@@ -205,3 +205,22 @@ CREATE TABLE sessions (
 CREATE INDEX idx_sessions_agent ON sessions(agent_id);
 CREATE INDEX idx_sessions_orchestrator ON sessions(orchestrator_id);
 CREATE INDEX idx_sessions_started ON sessions(started_at);
+
+-- ============================================
+-- POOL SLOTS (worktree pool for agents)
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS pool_slots (
+    id INTEGER NOT NULL,
+    project TEXT NOT NULL,
+    path TEXT NOT NULL,
+    branch TEXT,
+    agent_id TEXT,
+    session_id TEXT,
+    status TEXT NOT NULL DEFAULT 'ready',  -- ready, acquired, dirty
+    acquired_at INTEGER,
+    released_at INTEGER,
+    PRIMARY KEY (project, id)
+);
+
+CREATE INDEX idx_pool_slots_status ON pool_slots(project, status);
