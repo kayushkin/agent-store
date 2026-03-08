@@ -207,20 +207,61 @@ CREATE INDEX idx_sessions_orchestrator ON sessions(orchestrator_id);
 CREATE INDEX idx_sessions_started ON sessions(started_at);
 
 -- ============================================
--- POOL SLOTS (worktree pool for agents)
+-- POOLS (project pool registration)
 -- ============================================
 
-CREATE TABLE IF NOT EXISTS pool_slots (
+CREATE TABLE pools (
+    project TEXT PRIMARY KEY,
+    base_repo TEXT NOT NULL,
+    pool_dir TEXT NOT NULL,
+    size INTEGER NOT NULL DEFAULT 3,
+    default_branch TEXT DEFAULT 'main',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE pool_settings (
+    project TEXT NOT NULL,
+    key TEXT NOT NULL,              -- deploy_host, deploy_user, deploy_dir, base_port, repo_url
+    value TEXT,
+    PRIMARY KEY (project, key),
+    FOREIGN KEY (project) REFERENCES pools(project) ON DELETE CASCADE
+);
+
+-- ============================================
+-- POOL SLOTS (worktree instances)
+-- ============================================
+
+CREATE TABLE pool_slots (
     id INTEGER NOT NULL,
     project TEXT NOT NULL,
     path TEXT NOT NULL,
     branch TEXT,
     agent_id TEXT,
     session_id TEXT,
-    status TEXT NOT NULL DEFAULT 'ready',  -- ready, acquired, dirty
+    status TEXT NOT NULL DEFAULT 'ready',
     acquired_at INTEGER,
     released_at INTEGER,
-    PRIMARY KEY (project, id)
+    PRIMARY KEY (project, id),
+    FOREIGN KEY (project) REFERENCES pools(project) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_pool_slots_status ON pool_slots(project, status);
+
+-- ============================================
+-- DEV SERVERS (preview instances on remote)
+-- ============================================
+
+CREATE TABLE dev_servers (
+    project TEXT NOT NULL,
+    slot_id INTEGER NOT NULL,
+    port INTEGER NOT NULL,
+    pid INTEGER,
+    branch TEXT,
+    status TEXT DEFAULT 'stopped',
+    deploy_host TEXT,
+    deployed_at INTEGER,
+    stopped_at INTEGER,
+    PRIMARY KEY (project, slot_id),
+    FOREIGN KEY (project, slot_id) REFERENCES pool_slots(project, id) ON DELETE CASCADE
+);

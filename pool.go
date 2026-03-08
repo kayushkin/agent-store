@@ -32,11 +32,23 @@ type Slot struct {
 // ErrNoSlotsAvailable is returned when all pool slots are busy
 var ErrNoSlotsAvailable = fmt.Errorf("no available slots in pool")
 
-// InitPool creates a pool of worktree slots for a project
-// baseRepo is the main git repository (e.g., ~/life/repos/inber)
-// poolDir is where worktrees will be created (e.g., ~/life/repos/.pools/inber)
-// size is the number of slots to create
+// InitPool creates a pool of worktree slots for a project.
+// Uses the registered pool config from the database.
+// If no config is registered, pass baseRepo/poolDir/size directly (legacy).
 func (s *Store) InitPool(project, baseRepo, poolDir string, size int) error {
+	// Try to use registered config if args are empty
+	if baseRepo == "" || poolDir == "" {
+		cfg, err := s.GetPool(project)
+		if err != nil {
+			return fmt.Errorf("pool %q not registered and no args provided: %w", project, err)
+		}
+		baseRepo = cfg.BaseRepo
+		poolDir = cfg.PoolDir
+		if size == 0 {
+			size = cfg.Size
+		}
+	}
+
 	// Expand paths
 	baseRepo = expandPath(baseRepo)
 	poolDir = expandPath(poolDir)
@@ -50,6 +62,14 @@ func (s *Store) InitPool(project, baseRepo, poolDir string, size int) error {
 	if err := os.MkdirAll(poolDir, 0755); err != nil {
 		return fmt.Errorf("create pool directory: %w", err)
 	}
+
+	// Register pool if not already registered
+	_ = s.RegisterPool(PoolConfig{
+		Project:  project,
+		BaseRepo: baseRepo,
+		PoolDir:  poolDir,
+		Size:     size,
+	})
 
 	// Initialize slots in database and create worktrees
 	for i := 0; i < size; i++ {
@@ -79,6 +99,12 @@ func (s *Store) InitPool(project, baseRepo, poolDir string, size int) error {
 	}
 
 	return nil
+}
+
+// InitPoolFromConfig creates a pool using only the registered config in the database.
+// Call RegisterPool first, then this.
+func (s *Store) InitPoolFromConfig(project string) error {
+	return s.InitPool(project, "", "", 0)
 }
 
 // Acquire finds an available slot and marks it as acquired
