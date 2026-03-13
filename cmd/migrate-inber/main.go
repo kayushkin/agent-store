@@ -41,8 +41,9 @@ type inberContextConfig struct {
 }
 
 type inberAgentLimits struct {
-	MaxTurns       int `json:"maxTurns,omitempty"`
-	MaxInputTokens int `json:"maxInputTokens,omitempty"`
+	MaxTurns        int `json:"maxTurns,omitempty"`
+	MaxInputTokens  int `json:"maxInputTokens,omitempty"`
+	MaxResponseTime int `json:"maxResponseTime,omitempty"`
 }
 
 func main() {
@@ -261,6 +262,11 @@ func migrateAgent(store *agentstore.Store, agentsDir, id string, cfg *inberAgent
 		if cfg.Limits.MaxInputTokens > 0 {
 			if err := store.SetLimit(id, "inber", "max_input_tokens", cfg.Limits.MaxInputTokens); err != nil {
 				return fmt.Errorf("set max_input_tokens: %w", err)
+			}
+		}
+		if cfg.Limits.MaxResponseTime > 0 {
+			if err := store.SetLimit(id, "inber", "max_response_time", cfg.Limits.MaxResponseTime); err != nil {
+				return fmt.Errorf("set max_response_time: %w", err)
 			}
 		}
 	}
