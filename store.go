@@ -169,6 +169,50 @@ func (s *Store) ListAgents() ([]Agent, error) {
 	return out, rows.Err()
 }
 
+// AgentWithOrchestrator is an agent entry expanded per orchestrator.
+type AgentWithOrchestrator struct {
+	Slug             string
+	DisplayName      string
+	Emoji            string
+	Projects         string
+	Description      string
+	Role             string
+	Enabled          bool
+	Orchestrator     string // orchestrator ID
+	OrchestratorName string // what the orchestrator calls this agent
+	Model            string
+}
+
+// ListAgentsExpanded returns one row per agent+orchestrator pair.
+func (s *Store) ListAgentsExpanded() ([]AgentWithOrchestrator, error) {
+	rows, err := s.db.Query(`
+		SELECT a.slug, COALESCE(a.display_name,''), COALESCE(a.emoji,''), COALESCE(a.projects,''),
+		       COALESCE(a.description,''), COALESCE(a.role,''), a.enabled,
+		       ao.orchestrator_id, ao.orchestrator_agent_id, COALESCE(ao.model_primary, '')
+		FROM agents a
+		JOIN agent_orchestrators ao ON a.id = ao.agent_id
+		WHERE ao.shelved = 0
+		ORDER BY ao.orchestrator_id, a.slug
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []AgentWithOrchestrator
+	for rows.Next() {
+		var a AgentWithOrchestrator
+		var enabled int
+		if err := rows.Scan(&a.Slug, &a.DisplayName, &a.Emoji, &a.Projects, &a.Description, &a.Role, &enabled,
+			&a.Orchestrator, &a.OrchestratorName, &a.Model); err != nil {
+			return nil, err
+		}
+		a.Enabled = enabled != 0
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) DeleteAgent(id int64) error {
 	_, err := s.db.Exec("DELETE FROM agents WHERE id=?", id)
 	return err

@@ -66,19 +66,23 @@ func main() {
 
 			// Register agents.list handler
 			busClient.Reply("agents.list", func(data []byte) (any, error) {
-				agents, err := store.ListAgents()
+				agents, err := store.ListAgentsExpanded()
 				if err != nil {
 					return messages.APIResponse{OK: false, Error: err.Error()}, nil
 				}
-				// Convert to standard AgentEntry
 				entries := make([]messages.AgentEntry, len(agents))
 				for i, a := range agents {
+					name := a.OrchestratorName
+					if name == "" {
+						name = a.Slug
+					}
 					entries[i] = messages.AgentEntry{
-						Name:        a.Slug,
-						Description: a.Description,
-						Emoji:       a.Emoji,
-						Project:     a.Projects,
-						Enabled:     a.Enabled,
+						Name:         name,
+						Orchestrator: a.Orchestrator,
+						Description:  a.Description,
+						Emoji:        a.Emoji,
+						Project:      a.Projects,
+						Enabled:      a.Enabled,
 					}
 				}
 				return messages.APIResponse{OK: true, Data: entries}, nil
