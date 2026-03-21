@@ -56,6 +56,8 @@ CREATE TABLE IF NOT EXISTS agent_orchestrators (
     system_prompt TEXT,                    -- custom system prompt override
     project TEXT,                          -- forge project name
     shelved INTEGER DEFAULT 0,
+    is_default INTEGER DEFAULT 0,
+    subagent_allow TEXT,                  -- JSON array, e.g. '["*"]'
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (agent_id, orchestrator_id),

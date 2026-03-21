@@ -59,8 +59,18 @@ func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) DB() *sql.DB  { return s.db }
 
 func (s *Store) migrate() error {
-	_, err := s.db.Exec(schemaSQL)
-	return err
+	if _, err := s.db.Exec(schemaSQL); err != nil {
+		return err
+	}
+	// Add columns that may not exist in older databases
+	migrations := []string{
+		"ALTER TABLE agent_orchestrators ADD COLUMN is_default INTEGER DEFAULT 0",
+		"ALTER TABLE agent_orchestrators ADD COLUMN subagent_allow TEXT",
+	}
+	for _, m := range migrations {
+		s.db.Exec(m) // ignore "duplicate column" errors
+	}
+	return nil
 }
 
 func now() int64 { return time.Now().Unix() }
@@ -249,6 +259,8 @@ type AgentOrchestrator struct {
 	SystemPrompt        string
 	Project             string
 	Shelved             bool
+	IsDefault           bool
+	SubagentAllow       string // JSON array, e.g. '["*"]'
 	CreatedAt           int64
 	UpdatedAt           int64
 }
@@ -259,8 +271,8 @@ func (s *Store) UpsertAgentOrchestrator(ao *AgentOrchestrator) error {
 	}
 	ao.UpdatedAt = now()
 	_, err := s.db.Exec(`
-		INSERT INTO agent_orchestrators (agent_id, orchestrator_id, orchestrator_agent_id, enabled, model_primary, model_fallbacks, workspace_path, thinking_budget, context_budget, context_tags, max_turns, max_input_tokens, max_response_time, system_prompt, project, shelved, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO agent_orchestrators (agent_id, orchestrator_id, orchestrator_agent_id, enabled, model_primary, model_fallbacks, workspace_path, thinking_budget, context_budget, context_tags, max_turns, max_input_tokens, max_response_time, system_prompt, project, shelved, is_default, subagent_allow, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(agent_id, orchestrator_id) DO UPDATE SET
 			orchestrator_agent_id=excluded.orchestrator_agent_id, enabled=excluded.enabled,
 			model_primary=excluded.model_primary, model_fallbacks=excluded.model_fallbacks,
@@ -268,26 +280,29 @@ func (s *Store) UpsertAgentOrchestrator(ao *AgentOrchestrator) error {
 			context_budget=excluded.context_budget, context_tags=excluded.context_tags,
 			max_turns=excluded.max_turns, max_input_tokens=excluded.max_input_tokens,
 			max_response_time=excluded.max_response_time, system_prompt=excluded.system_prompt,
-			project=excluded.project, shelved=excluded.shelved, updated_at=excluded.updated_at
-	`, ao.AgentID, ao.OrchestratorID, ao.OrchestratorAgentID, boolToInt(ao.Enabled), ao.ModelPrimary, ao.ModelFallbacks, ao.WorkspacePath, ao.ThinkingBudget, ao.ContextBudget, ao.ContextTags, ao.MaxTurns, ao.MaxInputTokens, ao.MaxResponseTime, ao.SystemPrompt, ao.Project, boolToInt(ao.Shelved), ao.CreatedAt, ao.UpdatedAt)
+			project=excluded.project, shelved=excluded.shelved, is_default=excluded.is_default,
+			subagent_allow=excluded.subagent_allow, updated_at=excluded.updated_at
+	`, ao.AgentID, ao.OrchestratorID, ao.OrchestratorAgentID, boolToInt(ao.Enabled), ao.ModelPrimary, ao.ModelFallbacks, ao.WorkspacePath, ao.ThinkingBudget, ao.ContextBudget, ao.ContextTags, ao.MaxTurns, ao.MaxInputTokens, ao.MaxResponseTime, ao.SystemPrompt, ao.Project, boolToInt(ao.Shelved), boolToInt(ao.IsDefault), ao.SubagentAllow, ao.CreatedAt, ao.UpdatedAt)
 	return err
 }
 
-const aoCols = `agent_id, orchestrator_id, orchestrator_agent_id, enabled, model_primary, model_fallbacks, workspace_path, thinking_budget, context_budget, context_tags, max_turns, max_input_tokens, max_response_time, system_prompt, project, shelved, created_at, updated_at`
+const aoCols = `agent_id, orchestrator_id, orchestrator_agent_id, enabled, model_primary, model_fallbacks, workspace_path, thinking_budget, context_budget, context_tags, max_turns, max_input_tokens, max_response_time, system_prompt, project, shelved, is_default, subagent_allow, created_at, updated_at`
 
 func scanAO(row interface{ Scan(...any) error }) (AgentOrchestrator, error) {
 	var ao AgentOrchestrator
-	var enabled, shelved int
-	var modelFallbacks, contextTags, systemPrompt, workspacePath, project, orchestratorAgentID *string
-	err := row.Scan(&ao.AgentID, &ao.OrchestratorID, &orchestratorAgentID, &enabled, &ao.ModelPrimary, &modelFallbacks, &workspacePath, &ao.ThinkingBudget, &ao.ContextBudget, &contextTags, &ao.MaxTurns, &ao.MaxInputTokens, &ao.MaxResponseTime, &systemPrompt, &project, &shelved, &ao.CreatedAt, &ao.UpdatedAt)
+	var enabled, shelved, isDefault int
+	var modelFallbacks, contextTags, systemPrompt, workspacePath, project, orchestratorAgentID, subagentAllow *string
+	err := row.Scan(&ao.AgentID, &ao.OrchestratorID, &orchestratorAgentID, &enabled, &ao.ModelPrimary, &modelFallbacks, &workspacePath, &ao.ThinkingBudget, &ao.ContextBudget, &contextTags, &ao.MaxTurns, &ao.MaxInputTokens, &ao.MaxResponseTime, &systemPrompt, &project, &shelved, &isDefault, &subagentAllow, &ao.CreatedAt, &ao.UpdatedAt)
 	ao.Enabled = enabled == 1
 	ao.Shelved = shelved == 1
+	ao.IsDefault = isDefault == 1
 	if orchestratorAgentID != nil { ao.OrchestratorAgentID = *orchestratorAgentID }
 	if modelFallbacks != nil { ao.ModelFallbacks = *modelFallbacks }
 	if workspacePath != nil { ao.WorkspacePath = *workspacePath }
 	if contextTags != nil { ao.ContextTags = *contextTags }
 	if systemPrompt != nil { ao.SystemPrompt = *systemPrompt }
 	if project != nil { ao.Project = *project }
+	if subagentAllow != nil { ao.SubagentAllow = *subagentAllow }
 	return ao, err
 }
 
@@ -323,6 +338,17 @@ func (s *Store) GetOrchestratorAgents(orchestratorID string) ([]AgentOrchestrato
 		out = append(out, ao)
 	}
 	return out, rows.Err()
+}
+
+// GetAgentByOrchestratorID finds an agent by its orchestrator-specific ID.
+func (s *Store) GetAgentByOrchestratorID(orchestratorID, orchAgentID string) (*Agent, error) {
+	var agentID int64
+	err := s.db.QueryRow(`SELECT agent_id FROM agent_orchestrators WHERE orchestrator_id=? AND orchestrator_agent_id=?`,
+		orchestratorID, orchAgentID).Scan(&agentID)
+	if err != nil {
+		return nil, err
+	}
+	return s.GetAgent(agentID)
 }
 
 func (s *Store) DeleteAgentOrchestrator(agentID int64, orchestratorID string) error {
@@ -820,6 +846,10 @@ func (s *Store) GetModifiedFiles() ([]FileScan, error) {
 // ============================================
 // MEMORIES
 // ============================================
+//
+// TODO: This memory implementation is superseded by the memory/ package.
+// These functions are kept for compatibility with server.go endpoints.
+// Consider migrating server.go to use the memory/ package directly.
 
 type Memory struct {
 	ID           string
