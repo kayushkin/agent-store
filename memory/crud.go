@@ -56,8 +56,8 @@ func (s *Store) Save(m Memory) error {
 
 	// Upsert memory (insert or update on conflict)
 	query := `
-	INSERT INTO memories (id, content, summary, original_id, importance, access_count, last_accessed, created_at, source, embedding, always_load, expires_at, tokens, ref_type, ref_target, is_lazy)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO memories (id, content, summary, original_id, importance, access_count, last_accessed, created_at, source, embedding, always_load, expires_at, tokens, ref_type, ref_target, is_lazy, orchestrator)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		content = excluded.content,
 		summary = excluded.summary,
@@ -70,14 +70,15 @@ func (s *Store) Save(m Memory) error {
 		tokens = excluded.tokens,
 		ref_type = excluded.ref_type,
 		ref_target = excluded.ref_target,
-		is_lazy = excluded.is_lazy
+		is_lazy = excluded.is_lazy,
+		orchestrator = excluded.orchestrator
 	`
 	_, err = tx.Exec(query,
 		m.ID, m.Content, nullString(m.Summary), nullString(m.OriginalID),
 		m.Importance, m.AccessCount,
 		m.LastAccessed.Unix(), m.CreatedAt.Unix(), m.Source, embJSON,
 		m.AlwaysLoad, nullInt64Ptr(m.ExpiresAt), m.Tokens,
-		m.RefType, nullString(m.RefTarget), m.IsLazy,
+		m.RefType, nullString(m.RefTarget), m.IsLazy, m.Orchestrator,
 	)
 	if err != nil {
 		return fmt.Errorf("insert memory: %w", err)
@@ -108,7 +109,7 @@ func (s *Store) Save(m Memory) error {
 func (s *Store) Get(id string) (*Memory, error) {
 	// Support prefix matching (e.g., first 8 chars of UUID)
 	query := `
-	SELECT id, content, summary, original_id, importance, access_count, last_accessed, created_at, source, embedding, always_load, expires_at, tokens, ref_type, ref_target, is_lazy
+	SELECT id, content, summary, original_id, importance, access_count, last_accessed, created_at, source, embedding, always_load, expires_at, tokens, ref_type, ref_target, is_lazy, orchestrator
 	FROM memories
 	WHERE id = ? OR id LIKE ?
 	`
@@ -124,7 +125,7 @@ func (s *Store) Get(id string) (*Memory, error) {
 		&m.ID, &m.Content, &summary, &originalID,
 		&m.Importance, &m.AccessCount, &lastAccessed, &createdAt, &m.Source, &embJSON,
 		&m.AlwaysLoad, &expiresAt, &m.Tokens,
-		&m.RefType, &refTarget, &m.IsLazy,
+		&m.RefType, &refTarget, &m.IsLazy, &m.Orchestrator,
 	)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("memory not found: %s", id)

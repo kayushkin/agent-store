@@ -40,6 +40,10 @@ func runMigrations(db *sql.DB) error {
 		"ALTER TABLE memories ADD COLUMN ref_target TEXT",
 		"ALTER TABLE memories ADD COLUMN is_lazy INTEGER NOT NULL DEFAULT 0",
 		"CREATE INDEX IF NOT EXISTS idx_ref_type ON memories(ref_type)",
+
+		// Orchestrator scoping (2026-03-21)
+		"ALTER TABLE memories ADD COLUMN orchestrator TEXT NOT NULL DEFAULT ''",
+		"CREATE INDEX IF NOT EXISTS idx_orchestrator ON memories(orchestrator)",
 	}
 	
 	for _, migration := range migrations {

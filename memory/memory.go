@@ -29,6 +29,9 @@ type Memory struct {
 	RefType      string     // "memory" (default), "file", "identity", "repo-map", "tools", "web"
 	RefTarget    string     // file path, URL, or empty for pure memories
 	IsLazy       bool       // if true, load content on-demand instead of from DB
+
+	// Orchestrator scoping
+	Orchestrator string     // "inber", "openclaw", etc. — which orchestrator owns this memory
 }
 
 // Store handles persistent memory storage via SQLite.
@@ -44,6 +47,7 @@ type MemoryStore interface {
 	Save(m Memory) error
 	Get(id string) (*Memory, error)
 	Search(query string, limit int) ([]Memory, error)
+	SearchFiltered(query string, limit int, orchestrator string) ([]Memory, error)
 	Forget(id string) error
 	
 	// Memory management

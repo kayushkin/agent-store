@@ -98,11 +98,16 @@ func RegisterNATSHandlers(busClient *bus.Client, memStore memory.MemoryStore) er
 			RefType:      m.RefType,
 			RefTarget:    m.RefTarget,
 			IsLazy:       m.IsLazy,
+			Orchestrator: m.Orchestrator,
 		}
 	}
 
 	// Helper function to convert messages.Memory to memory.Memory
-	messageToMemory := func(m messages.Memory) memory.Memory {
+	messageToMemory := func(m messages.Memory, orchestrator string) memory.Memory {
+		orch := m.Orchestrator
+		if orch == "" {
+			orch = orchestrator
+		}
 		return memory.Memory{
 			ID:           m.ID,
 			Content:      m.Content,
@@ -121,6 +126,7 @@ func RegisterNATSHandlers(busClient *bus.Client, memStore memory.MemoryStore) er
 			RefType:      m.RefType,
 			RefTarget:    m.RefTarget,
 			IsLazy:       m.IsLazy,
+			Orchestrator: orch,
 		}
 	}
 
@@ -131,7 +137,7 @@ func RegisterNATSHandlers(busClient *bus.Client, memStore memory.MemoryStore) er
 			return messages.MemorySaveResponse{Success: false, Error: err.Error()}, nil
 		}
 
-		m := messageToMemory(req.Memory)
+		m := messageToMemory(req.Memory, req.Orchestrator)
 		if err := memStore.Save(m); err != nil {
 			return messages.MemorySaveResponse{Success: false, Error: err.Error()}, nil
 		}
@@ -168,7 +174,7 @@ func RegisterNATSHandlers(busClient *bus.Client, memStore memory.MemoryStore) er
 			return messages.MemorySearchResponse{Error: err.Error()}, nil
 		}
 
-		memories, err := memStore.Search(req.Query, req.Limit)
+		memories, err := memStore.SearchFiltered(req.Query, req.Limit, req.Orchestrator)
 		if err != nil {
 			return messages.MemorySearchResponse{Error: err.Error()}, nil
 		}

@@ -46,6 +46,7 @@ func (n *NATSStore) memoryToMessage(m Memory) messages.Memory {
 		RefType:      m.RefType,
 		RefTarget:    m.RefTarget,
 		IsLazy:       m.IsLazy,
+		Orchestrator: m.Orchestrator,
 	}
 }
 
@@ -69,6 +70,7 @@ func (n *NATSStore) messageToMemory(m messages.Memory) Memory {
 		RefType:      m.RefType,
 		RefTarget:    m.RefTarget,
 		IsLazy:       m.IsLazy,
+		Orchestrator: m.Orchestrator,
 	}
 }
 
@@ -117,6 +119,32 @@ func (n *NATSStore) Get(id string) (*Memory, error) {
 	
 	m := n.messageToMemory(*resp.Memory)
 	return &m, nil
+}
+
+// SearchFiltered finds memories matching the query, optionally filtered by orchestrator
+func (n *NATSStore) SearchFiltered(query string, limit int, orchestrator string) ([]Memory, error) {
+	req := messages.MemorySearchRequest{Query: query, Limit: limit, Orchestrator: orchestrator}
+	
+	respData, err := n.client.Request("memory.search", req, n.timeout)
+	if err != nil {
+		return nil, fmt.Errorf("NATS request failed: %w", err)
+	}
+	
+	var resp messages.MemorySearchResponse
+	if err := json.Unmarshal(respData, &resp); err != nil {
+		return nil, fmt.Errorf("unmarshal response: %w", err)
+	}
+	
+	if resp.Error != "" {
+		return nil, fmt.Errorf("search failed: %s", resp.Error)
+	}
+	
+	memories := make([]Memory, len(resp.Memories))
+	for i, m := range resp.Memories {
+		memories[i] = n.messageToMemory(m)
+	}
+	
+	return memories, nil
 }
 
 // Search finds memories matching the query
