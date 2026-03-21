@@ -4,7 +4,7 @@ go 1.24.0
 
 require (
 	github.com/google/uuid v1.6.0
-	github.com/kayushkin/bus v0.0.0-20260321193724-24483229d5cf
+	github.com/kayushkin/bus v0.0.0-20260321214617-be0632fc1690
 	github.com/mattn/go-sqlite3 v1.14.37
 	modernc.org/sqlite v1.46.1
 )

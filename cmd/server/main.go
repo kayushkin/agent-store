@@ -53,8 +53,8 @@ func main() {
 		log.Fatal(http.ListenAndServe(addr, mux))
 	}()
 
-	// Start NATS handlers if memory store is available
-	if memStore != nil {
+	// Start NATS handlers
+	{
 		busClient, err := bus.Connect(bus.Options{
 			URL:  natsURL,
 			Name: "agent-store",
@@ -64,7 +64,30 @@ func main() {
 		} else {
 			defer busClient.Close()
 
-			if err := RegisterNATSHandlers(busClient, memStore); err != nil {
+			// Register agents.list handler
+			busClient.Reply("agents.list", func(data []byte) (any, error) {
+				agents, err := store.ListAgents()
+				if err != nil {
+					return messages.APIResponse{OK: false, Error: err.Error()}, nil
+				}
+				// Convert to standard AgentEntry
+				entries := make([]messages.AgentEntry, len(agents))
+				for i, a := range agents {
+					entries[i] = messages.AgentEntry{
+						Name:        a.Slug,
+						Description: a.Description,
+						Emoji:       a.Emoji,
+						Project:     a.Projects,
+						Enabled:     a.Enabled,
+					}
+				}
+				return messages.APIResponse{OK: true, Data: entries}, nil
+			})
+			log.Printf("agents.list NATS handler registered")
+
+			if memStore == nil {
+				log.Printf("warning: memory store unavailable, skipping memory NATS handlers")
+			} else if err := RegisterNATSHandlers(busClient, memStore); err != nil {
 				log.Printf("warning: failed to register NATS handlers: %v", err)
 			} else {
 				log.Printf("agent-store NATS handlers registered (url: %s)", natsURL)
