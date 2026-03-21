@@ -247,6 +247,68 @@ func RegisterNATSHandlers(busClient *bus.Client, memStore memory.MemoryStore) er
 		return fmt.Errorf("register memory.list: %w", err)
 	}
 
+	// memory.compare — cross-orchestrator comparison
+	_, err = busClient.Reply("memory.compare", func(data []byte) (any, error) {
+		var req messages.MemoryCompareRequest
+		if err := json.Unmarshal(data, &req); err != nil {
+			return messages.MemoryCompareResponse{Error: err.Error()}, nil
+		}
+
+		sqlStore, ok := memStore.(*memory.Store)
+		if !ok {
+			return messages.MemoryCompareResponse{Error: "compare requires SQLite store"}, nil
+		}
+
+		limit := req.Limit
+		if limit <= 0 {
+			limit = 10
+		}
+
+		// Determine orchestrators to compare
+		orchestrators := req.Orchestrators
+		if len(orchestrators) == 0 {
+			var err error
+			orchestrators, err = sqlStore.ListOrchestrators()
+			if err != nil {
+				return messages.MemoryCompareResponse{Error: err.Error()}, nil
+			}
+		}
+
+		var groups []messages.MemoryCompareGroup
+		for _, orch := range orchestrators {
+			var memories []memory.Memory
+			var err error
+
+			if req.Query != "" {
+				memories, err = memStore.SearchFiltered(req.Query, limit, orch)
+			} else {
+				memories, err = sqlStore.ListByOrchestrator(orch, limit, req.MinImportance)
+			}
+			if err != nil {
+				log.Printf("[compare] error for %s: %v", orch, err)
+				continue
+			}
+
+			total, _ := sqlStore.CountByOrchestrator(orch)
+
+			msgMems := make([]messages.Memory, len(memories))
+			for i, m := range memories {
+				msgMems[i] = memoryToMessage(m)
+			}
+
+			groups = append(groups, messages.MemoryCompareGroup{
+				Orchestrator: orch,
+				Memories:     msgMems,
+				Total:        total,
+			})
+		}
+
+		return messages.MemoryCompareResponse{Groups: groups}, nil
+	})
+	if err != nil {
+		return fmt.Errorf("register memory.compare: %w", err)
+	}
+
 	// memory.compact
 	_, err = busClient.Reply("memory.compact", func(data []byte) (any, error) {
 		var req messages.MemoryCompactRequest
