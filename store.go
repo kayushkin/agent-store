@@ -181,6 +181,7 @@ type AgentWithOrchestrator struct {
 	Orchestrator     string // orchestrator ID
 	OrchestratorName string // what the orchestrator calls this agent
 	Model            string
+	IsDefault        bool   // true if this is the orchestrator's default agent
 }
 
 // ListAgentsExpanded returns one row per agent+orchestrator pair.
@@ -188,9 +189,11 @@ func (s *Store) ListAgentsExpanded() ([]AgentWithOrchestrator, error) {
 	rows, err := s.db.Query(`
 		SELECT a.slug, COALESCE(a.display_name,''), COALESCE(a.emoji,''), COALESCE(a.projects,''),
 		       COALESCE(a.description,''), COALESCE(a.role,''), a.enabled,
-		       ao.orchestrator_id, ao.orchestrator_agent_id, COALESCE(ao.model_primary, '')
+		       ao.orchestrator_id, ao.orchestrator_agent_id, COALESCE(ao.model_primary, ''),
+		       CASE WHEN o.default_agent_id = a.id THEN 1 ELSE 0 END
 		FROM agents a
 		JOIN agent_orchestrators ao ON a.id = ao.agent_id
+		LEFT JOIN orchestrators o ON o.id = ao.orchestrator_id
 		WHERE ao.shelved = 0
 		ORDER BY ao.orchestrator_id, a.slug
 	`)
@@ -202,12 +205,13 @@ func (s *Store) ListAgentsExpanded() ([]AgentWithOrchestrator, error) {
 	var out []AgentWithOrchestrator
 	for rows.Next() {
 		var a AgentWithOrchestrator
-		var enabled int
+		var enabled, isDefault int
 		if err := rows.Scan(&a.Slug, &a.DisplayName, &a.Emoji, &a.Projects, &a.Description, &a.Role, &enabled,
-			&a.Orchestrator, &a.OrchestratorName, &a.Model); err != nil {
+			&a.Orchestrator, &a.OrchestratorName, &a.Model, &isDefault); err != nil {
 			return nil, err
 		}
 		a.Enabled = enabled != 0
+		a.IsDefault = isDefault != 0
 		out = append(out, a)
 	}
 	return out, rows.Err()

@@ -83,6 +83,7 @@ func main() {
 						Emoji:        a.Emoji,
 						Project:      a.Projects,
 						Enabled:      a.Enabled,
+						IsDefault:    a.IsDefault,
 					}
 				}
 				return messages.APIResponse{OK: true, Data: entries}, nil
