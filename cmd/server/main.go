@@ -78,6 +78,8 @@ func main() {
 					}
 					entries[i] = messages.AgentEntry{
 						Name:         name,
+						Slug:         a.Slug,
+						DisplayName:  a.DisplayName,
 						Orchestrator: a.Orchestrator,
 						Description:  a.Description,
 						Emoji:        a.Emoji,
