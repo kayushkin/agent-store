@@ -195,12 +195,86 @@ func (h *handler) memoryCompact(w http.ResponseWriter, r *http.Request) {
 // === Agents ===
 
 func (h *handler) listAgents(w http.ResponseWriter, r *http.Request) {
+	// Fetch statuses for merging
+	statuses, _ := h.s.ListStatuses()
+	statusMap := make(map[string]AgentStatus)
+	for _, st := range statuses {
+		if existing, ok := statusMap[st.AgentSlug]; !ok || (existing.Status == "idle" && st.Status != "idle") {
+			statusMap[st.AgentSlug] = st
+		}
+	}
+
+	if r.URL.Query().Get("expanded") == "true" {
+		expanded, err := h.s.ListAgentsExpanded()
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		type expandedResponse struct {
+			Name            string  `json:"name"`
+			DisplayName     string  `json:"display_name"`
+			Orchestrator    string  `json:"orchestrator"`
+			Emoji           string  `json:"emoji"`
+			Project         string  `json:"project"`
+			Enabled         bool    `json:"enabled"`
+			IsDefault       bool    `json:"is_default"`
+			OrchEmoji       string  `json:"orch_emoji"`
+			Status          string  `json:"status"`
+			StatusTask      *string `json:"status_task,omitempty"`
+			StatusSessionID *string `json:"status_session_id,omitempty"`
+			StatusSince     *int64  `json:"status_since,omitempty"`
+		}
+		out := make([]expandedResponse, len(expanded))
+		for i, a := range expanded {
+			name := a.OrchestratorName
+			if name == "" {
+				name = a.Slug
+			}
+			out[i] = expandedResponse{
+				Name:         name,
+				DisplayName:  a.DisplayName,
+				Orchestrator: a.Orchestrator,
+				Emoji:        a.Emoji,
+				Project:      a.Projects,
+				Enabled:      a.Enabled,
+				IsDefault:    a.IsDefault,
+				OrchEmoji:    a.OrchEmoji,
+				Status:       "idle",
+			}
+			if st, ok := statusMap[a.Slug]; ok {
+				out[i].Status = st.Status
+				out[i].StatusTask = st.Task
+				out[i].StatusSessionID = st.SessionID
+				out[i].StatusSince = st.StartedAt
+			}
+		}
+		writeJSON(w, 200, out)
+		return
+	}
+
 	agents, err := h.s.ListAgents()
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, agents)
+	type agentResponse struct {
+		Agent
+		Status          string  `json:"status"`
+		StatusTask      *string `json:"status_task,omitempty"`
+		StatusSessionID *string `json:"status_session_id,omitempty"`
+		StatusSince     *int64  `json:"status_since,omitempty"`
+	}
+	out := make([]agentResponse, len(agents))
+	for i, a := range agents {
+		out[i] = agentResponse{Agent: a, Status: "idle"}
+		if st, ok := statusMap[a.Slug]; ok {
+			out[i].Status = st.Status
+			out[i].StatusTask = st.Task
+			out[i].StatusSessionID = st.SessionID
+			out[i].StatusSince = st.StartedAt
+		}
+	}
+	writeJSON(w, 200, out)
 }
 
 func (h *handler) getAgent(w http.ResponseWriter, r *http.Request) {

@@ -231,3 +231,20 @@ CREATE TABLE IF NOT EXISTS project_nature (
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
     FOREIGN KEY (nature_id) REFERENCES agent_nature(id) ON DELETE CASCADE
 );
+
+-- ============================================
+-- AGENT STATUS (runtime status tracking)
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS agent_status (
+    agent_id INTEGER NOT NULL,
+    orchestrator_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'idle',
+    task TEXT,
+    session_id TEXT,
+    started_at INTEGER,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (agent_id, orchestrator_id),
+    FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
+    FOREIGN KEY (orchestrator_id) REFERENCES orchestrators(id) ON DELETE CASCADE
+);

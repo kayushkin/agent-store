@@ -64,32 +64,55 @@ func main() {
 		} else {
 			defer busClient.Close()
 
-			// Register agents.list handler
-			busClient.Reply("agents.list", func(data []byte) (any, error) {
-				agents, err := store.ListAgentsExpanded()
+			// Subscribe to chat.stream for agent status tracking
+			busClient.Subscribe("chat.stream", func(subject string, data []byte) {
+				var delta messages.ChatDelta
+				if err := json.Unmarshal(data, &delta); err != nil {
+					return
+				}
+				if delta.Agent == "" || delta.Orchestrator == "" {
+					return
+				}
+				// Resolve orchestrator-specific agent name to canonical slug
+				slug, err := store.ResolveOrchestratorAgent(delta.Orchestrator, delta.Agent)
 				if err != nil {
-					return messages.APIResponse{OK: false, Error: err.Error()}, nil
+					return
 				}
-				entries := make([]messages.AgentEntry, len(agents))
-				for i, a := range agents {
-					name := a.OrchestratorName
-					if name == "" {
-						name = a.Slug
-					}
-					entries[i] = messages.AgentEntry{
-						Name:         name,
-						DisplayName:  a.DisplayName,
-						Orchestrator: a.Orchestrator,
-						Description:  a.Description,
-						Emoji:        a.Emoji,
-						Project:      a.Projects,
-						Enabled:      a.Enabled,
-						IsDefault:    a.IsDefault,
-					}
+				switch delta.Type {
+				case "spawn_started":
+					store.SetStatus(slug, delta.Orchestrator, "working", delta.Text, delta.SessionID)
+				case "spawn_completed":
+					store.ClearStatus(slug, delta.Orchestrator)
+				case "session_active":
+					store.SetStatus(slug, delta.Orchestrator, "working", "", delta.SessionID)
+				case "session_idle":
+					store.ClearStatus(slug, delta.Orchestrator)
+				case "done", "completed":
+					store.ClearStatus(slug, delta.Orchestrator)
 				}
-				return messages.APIResponse{OK: true, Data: entries}, nil
 			})
-			log.Printf("agents.list NATS handler registered")
+			log.Printf("chat.stream status subscription registered")
+
+			// Subscribe to chat.completed (JetStream) as fallback
+			err = busClient.JetSubscribe("chat.completed", "agent-store-status", func(subject string, data []byte) {
+				var out messages.ChatOutbound
+				if err := json.Unmarshal(data, &out); err != nil {
+					return
+				}
+				if out.Agent == "" || out.Orchestrator == "" {
+					return
+				}
+				slug, err := store.ResolveOrchestratorAgent(out.Orchestrator, out.Agent)
+				if err != nil {
+					return
+				}
+				store.ClearStatus(slug, out.Orchestrator)
+			})
+			if err != nil {
+				log.Printf("warning: chat.completed JetStream subscription failed: %v", err)
+			} else {
+				log.Printf("chat.completed JetStream status subscription registered")
+			}
 
 			if memStore == nil {
 				log.Printf("warning: memory store unavailable, skipping memory NATS handlers")

@@ -182,6 +182,7 @@ type AgentWithOrchestrator struct {
 	OrchestratorName string // what the orchestrator calls this agent
 	Model            string
 	IsDefault        bool   // true if this is the orchestrator's default agent
+	OrchEmoji        string // orchestrator emoji
 }
 
 // ListAgentsExpanded returns one row per agent+orchestrator pair.
@@ -190,7 +191,8 @@ func (s *Store) ListAgentsExpanded() ([]AgentWithOrchestrator, error) {
 		SELECT a.slug, COALESCE(a.display_name,''), COALESCE(a.emoji,''), COALESCE(a.projects,''),
 		       COALESCE(a.description,''), COALESCE(a.role,''), a.enabled,
 		       ao.orchestrator_id, ao.orchestrator_agent_id, COALESCE(ao.model_primary, ''),
-		       CASE WHEN o.default_agent_id = a.id THEN 1 ELSE 0 END
+		       CASE WHEN o.default_agent_id = a.id THEN 1 ELSE 0 END,
+		       COALESCE(o.emoji, '')
 		FROM agents a
 		JOIN agent_orchestrators ao ON a.id = ao.agent_id
 		LEFT JOIN orchestrators o ON o.id = ao.orchestrator_id
@@ -207,7 +209,7 @@ func (s *Store) ListAgentsExpanded() ([]AgentWithOrchestrator, error) {
 		var a AgentWithOrchestrator
 		var enabled, isDefault int
 		if err := rows.Scan(&a.Slug, &a.DisplayName, &a.Emoji, &a.Projects, &a.Description, &a.Role, &enabled,
-			&a.Orchestrator, &a.OrchestratorName, &a.Model, &isDefault); err != nil {
+			&a.Orchestrator, &a.OrchestratorName, &a.Model, &isDefault, &a.OrchEmoji); err != nil {
 			return nil, err
 		}
 		a.Enabled = enabled != 0
@@ -1406,6 +1408,121 @@ func (s *Store) DeleteProjectNature(projectID, natureID int64) error {
 // ============================================
 // HELPERS
 // ============================================
+
+// ============================================
+// AGENT STATUS
+// ============================================
+
+// AgentStatus represents the runtime status of an agent on an orchestrator.
+type AgentStatus struct {
+	AgentSlug    string  `json:"agent_slug"`
+	DisplayName  string  `json:"display_name"`
+	Emoji        string  `json:"emoji"`
+	Orchestrator string  `json:"orchestrator"`
+	Status       string  `json:"status"`
+	Task         *string `json:"task,omitempty"`
+	SessionID    *string `json:"session_id,omitempty"`
+	StartedAt    *int64  `json:"started_at,omitempty"`
+	UpdatedAt    int64   `json:"updated_at"`
+}
+
+// SetStatus upserts an agent status row. Sets started_at when transitioning to "working".
+func (s *Store) SetStatus(agentSlug, orchestratorID, status, task, sessionID string) error {
+	agent, err := s.ResolveAgentName(agentSlug)
+	if err != nil {
+		return err
+	}
+	n := now()
+	var taskPtr, sessionPtr *string
+	if task != "" {
+		taskPtr = &task
+	}
+	if sessionID != "" {
+		sessionPtr = &sessionID
+	}
+	_, err = s.db.Exec(`
+		INSERT INTO agent_status (agent_id, orchestrator_id, status, task, session_id, started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(agent_id, orchestrator_id) DO UPDATE SET
+			status=excluded.status, task=excluded.task, session_id=excluded.session_id,
+			started_at=CASE WHEN agent_status.status != 'working' AND excluded.status = 'working' THEN excluded.updated_at ELSE agent_status.started_at END,
+			updated_at=excluded.updated_at
+	`, agent.ID, orchestratorID, status, taskPtr, sessionPtr, n, n)
+	return err
+}
+
+// ClearStatus sets an agent's status to idle and clears task/session.
+func (s *Store) ClearStatus(agentSlug, orchestratorID string) error {
+	agent, err := s.ResolveAgentName(agentSlug)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`
+		UPDATE agent_status SET status='idle', task=NULL, session_id=NULL, updated_at=?
+		WHERE agent_id=? AND orchestrator_id=?
+	`, now(), agent.ID, orchestratorID)
+	return err
+}
+
+// GetStatus returns the status of an agent across all orchestrators.
+func (s *Store) GetStatus(agentSlug string) ([]AgentStatus, error) {
+	agent, err := s.GetAgentBySlug(agentSlug)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(`
+		SELECT a.slug, a.display_name, COALESCE(a.emoji,''), s.orchestrator_id, s.status, s.task, s.session_id, s.started_at, s.updated_at
+		FROM agent_status s JOIN agents a ON a.id = s.agent_id
+		WHERE s.agent_id=?`, agent.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AgentStatus
+	for rows.Next() {
+		var st AgentStatus
+		if err := rows.Scan(&st.AgentSlug, &st.DisplayName, &st.Emoji, &st.Orchestrator, &st.Status, &st.Task, &st.SessionID, &st.StartedAt, &st.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, st)
+	}
+	return out, rows.Err()
+}
+
+// ListStatuses returns all agent statuses.
+func (s *Store) ListStatuses() ([]AgentStatus, error) {
+	rows, err := s.db.Query(`
+		SELECT a.slug, a.display_name, COALESCE(a.emoji,''), s.orchestrator_id, s.status, s.task, s.session_id, s.started_at, s.updated_at
+		FROM agent_status s JOIN agents a ON a.id = s.agent_id
+		ORDER BY a.slug, s.orchestrator_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AgentStatus
+	for rows.Next() {
+		var st AgentStatus
+		if err := rows.Scan(&st.AgentSlug, &st.DisplayName, &st.Emoji, &st.Orchestrator, &st.Status, &st.Task, &st.SessionID, &st.StartedAt, &st.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, st)
+	}
+	return out, rows.Err()
+}
+
+// ResolveOrchestratorAgent finds the canonical agent slug given an orchestrator-specific agent name.
+func (s *Store) ResolveOrchestratorAgent(orchestratorID, orchAgentName string) (string, error) {
+	var slug string
+	err := s.db.QueryRow(`
+		SELECT a.slug FROM agents a
+		JOIN agent_orchestrators ao ON a.id = ao.agent_id
+		WHERE ao.orchestrator_id=? AND ao.orchestrator_agent_id=?
+	`, orchestratorID, orchAgentName).Scan(&slug)
+	if err != nil {
+		return "", fmt.Errorf("no agent found for orchestrator=%s agent=%s", orchestratorID, orchAgentName)
+	}
+	return slug, nil
+}
 
 // Int64Ptr is a convenience for creating *int64 values.
 func Int64Ptr(v int64) *int64 { return &v }
