@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/google/uuid"
 )
 
 // PrepareSessionConfig configures what gets loaded into memory for a session
@@ -152,9 +151,9 @@ func (s *Store) loadRecentFiles(cfg PrepareSessionConfig) error {
 			tags = append(tags, "ext:"+ext)
 		}
 
-		// Save with TTL
+		// Save with TTL — deterministic ID for dedup (same file = same key = upsert)
 		err := s.Save(Memory{
-			ID:         "recent:" + uuid.NewString(),
+			ID:         "recent:" + f.RelativePath,
 			Content:    content,
 			Tags:       tags,
 			Importance: importance,
