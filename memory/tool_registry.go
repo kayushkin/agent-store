@@ -2,6 +2,7 @@ package memory
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -34,8 +35,15 @@ func (s *Store) LoadToolRegistry(tools []ToolMetadata) error {
 	var builder strings.Builder
 	builder.WriteString("You have access to these tools:\n\n")
 
-	// Sort categories for consistent output
-	for category, categoryTools := range categories {
+	// Sort categories for deterministic output (cache stability)
+	catNames := make([]string, 0, len(categories))
+	for cat := range categories {
+		catNames = append(catNames, cat)
+	}
+	sort.Strings(catNames)
+
+	for _, category := range catNames {
+		categoryTools := categories[category]
 		builder.WriteString(fmt.Sprintf("## %s\n\n", strings.Title(category)))
 		for _, tool := range categoryTools {
 			builder.WriteString(fmt.Sprintf("- **%s**: %s\n", tool.Name, tool.Description))
