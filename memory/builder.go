@@ -236,6 +236,9 @@ func isVolatileMemory(m Memory) bool {
 
 // truncateMemoryToPreview replaces a large memory's content with a preview
 // and a hint to use memory_expand(id) for the full content.
+//
+// Truncation is skipped if the preview would be >50% of the original content —
+// in that case it's not worth truncating since most of the content would still load.
 func truncateMemoryToPreview(m Memory, previewChars int) Memory {
 	content := m.Content
 	// Use summary if available and content is empty (lazy ref)
@@ -246,6 +249,13 @@ func truncateMemoryToPreview(m Memory, previewChars int) Memory {
 		return m // Already small enough
 	}
 
+	// Only truncate if we're removing more than 50% of the content.
+	// If the preview is >50% of the full content, just include it all —
+	// truncating saves little context and loses information.
+	if previewChars*2 >= len(content) {
+		return m
+	}
+
 	preview := content[:previewChars]
 	// Try to break at a word/line boundary
 	if lastNewline := lastIndexByte(preview, '\n'); lastNewline > previewChars/2 {
@@ -254,7 +264,8 @@ func truncateMemoryToPreview(m Memory, previewChars int) Memory {
 		preview = preview[:lastSpace]
 	}
 
-	m.Content = preview + "\n\n[... truncated — use memory_expand(\"" + m.ID + "\") for full content (" + itoa(m.Tokens) + " tokens)]"
+	omittedTokens := m.Tokens - (len(preview)+2)/3
+	m.Content = preview + "\n\n[... truncated — use memory_expand(\"" + m.ID + "\") for full content (" + itoa(m.Tokens) + " tokens, " + itoa(omittedTokens) + " omitted)]"
 	m.Tokens = (len(m.Content) + 2) / 3
 	return m
 }
