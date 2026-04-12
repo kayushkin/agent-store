@@ -8,16 +8,9 @@ import (
 )
 
 // RegisterHandlers registers all HTTP handlers on the given mux.
+// Memory handlers have moved to memory-store.
 func RegisterHandlers(mux *http.ServeMux, s *Store) {
 	h := &handler{s: s}
-
-	mux.HandleFunc("POST /memories/save", h.memorySave)
-	mux.HandleFunc("POST /memories/search", h.memorySearch)
-	mux.HandleFunc("DELETE /memories/{id}", h.memoryDelete)
-	mux.HandleFunc("POST /memories/expand", h.memoryExpand)
-	mux.HandleFunc("POST /memories/decay", h.memoryDecay)
-	mux.HandleFunc("POST /memories/prune", h.memoryPrune)
-	mux.HandleFunc("POST /memories/compact", h.memoryCompact)
 
 	mux.HandleFunc("GET /agents", h.listAgents)
 	mux.HandleFunc("GET /agents/{slug}", h.getAgent)
@@ -49,147 +42,6 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
-}
-
-// === Memory ===
-
-func (h *handler) memorySave(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		ID         string   `json:"id"`
-		Content    string   `json:"content"`
-		Summary    string   `json:"summary"`
-		OriginalID string   `json:"original_id"`
-		Kind       string   `json:"kind"`
-		Scope      string   `json:"scope"`
-		Importance float64  `json:"importance"`
-		Source     string   `json:"source"`
-		AgentID    *int64   `json:"agent_id"`
-		AgentSlug  string   `json:"agent_slug"`
-		ProjectID  *int64   `json:"project_id"`
-		ExpiresAt  *int64   `json:"expires_at"`
-		Tags       []string `json:"tags"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, 400, "invalid json: "+err.Error())
-		return
-	}
-	if req.Content == "" {
-		writeErr(w, 400, "content required")
-		return
-	}
-
-	agentID := req.AgentID
-	if agentID == nil && req.AgentSlug != "" {
-		a, err := h.s.GetAgentBySlug(req.AgentSlug)
-		if err != nil {
-			writeErr(w, 404, "agent not found: "+req.AgentSlug)
-			return
-		}
-		agentID = &a.ID
-	}
-
-	m := &Memory{
-		ID: req.ID, Content: req.Content, Summary: req.Summary, OriginalID: req.OriginalID,
-		Kind: req.Kind, Scope: req.Scope, Importance: req.Importance, Source: req.Source,
-		AgentID: agentID, ProjectID: req.ProjectID, ExpiresAt: req.ExpiresAt, Tags: req.Tags,
-	}
-	if err := h.s.SaveMemory(m); err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	writeJSON(w, 200, map[string]string{"id": m.ID, "status": "saved"})
-}
-
-func (h *handler) memorySearch(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Query     string `json:"query"`
-		Limit     int    `json:"limit"`
-		AgentID   *int64 `json:"agent_id"`
-		AgentSlug string `json:"agent_slug"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, 400, "invalid json")
-		return
-	}
-	agentID := req.AgentID
-	if agentID == nil && req.AgentSlug != "" {
-		a, err := h.s.GetAgentBySlug(req.AgentSlug)
-		if err != nil {
-			writeErr(w, 404, "agent not found: "+req.AgentSlug)
-			return
-		}
-		agentID = &a.ID
-	}
-	memories, err := h.s.SearchMemories(req.Query, agentID, req.Limit)
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	writeJSON(w, 200, memories)
-}
-
-func (h *handler) memoryDelete(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if err := h.s.DeleteMemory(id); err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	writeJSON(w, 200, map[string]string{"status": "deleted"})
-}
-
-func (h *handler) memoryExpand(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		ID string `json:"id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, 400, "invalid json")
-		return
-	}
-	m, err := h.s.ExpandMemory(req.ID)
-	if err != nil {
-		writeErr(w, 404, err.Error())
-		return
-	}
-	writeJSON(w, 200, m)
-}
-
-func (h *handler) memoryDecay(w http.ResponseWriter, r *http.Request) {
-	n, err := h.s.DecayMemories()
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	writeJSON(w, 200, map[string]any{"affected": n})
-}
-
-func (h *handler) memoryPrune(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Threshold float64 `json:"threshold"`
-	}
-	json.NewDecoder(r.Body).Decode(&req)
-	n, err := h.s.PruneMemories(req.Threshold)
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	writeJSON(w, 200, map[string]any{"pruned": n})
-}
-
-func (h *handler) memoryCompact(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		MinAgeSec      int64 `json:"min_age_sec"`
-		MinAccessCount int   `json:"min_access_count"`
-	}
-	json.NewDecoder(r.Body).Decode(&req)
-	results, err := h.s.CompactMemories(req.MinAgeSec, req.MinAccessCount)
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	if results == nil {
-		results = []CompactionResult{}
-	}
-	writeJSON(w, 200, results)
 }
 
 // === Agents ===

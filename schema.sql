@@ -107,7 +107,7 @@ CREATE TABLE IF NOT EXISTS agent_nature (
     content TEXT NOT NULL,
     content_hash TEXT,                     -- SHA256 of content for quick comparison
     priority INTEGER DEFAULT 0,
-    source_path TEXT,                      -- e.g. ~/life/repos/inber/agents/claxon/soul.md
+    source_path TEXT,                      -- e.g. ~/repos/inber/agents/claxon/soul.md
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
@@ -168,46 +168,6 @@ CREATE TABLE IF NOT EXISTS file_scans (
 
 CREATE INDEX IF NOT EXISTS idx_file_scans_dist ON file_scans(file_distribution_id);
 CREATE INDEX IF NOT EXISTS idx_file_scans_status ON file_scans(status);
-
--- ============================================
--- MEMORIES
--- ============================================
-
-CREATE TABLE IF NOT EXISTS memories (
-    id TEXT PRIMARY KEY,
-    content TEXT NOT NULL,
-    summary TEXT,
-    original_id TEXT,
-    kind TEXT,
-    scope TEXT DEFAULT 'agent',
-    importance REAL DEFAULT 0.5,
-    access_count INTEGER DEFAULT 0,
-    last_accessed INTEGER,
-    source TEXT,
-    agent_id INTEGER,
-    project_id INTEGER,
-    expires_at INTEGER,
-    embedding BLOB,
-    tokens INTEGER DEFAULT 0,
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE SET NULL,
-    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_memories_agent ON memories(agent_id);
-CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project_id);
-CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind);
-CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope);
-CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance);
-
-CREATE TABLE IF NOT EXISTS memory_tags (
-    memory_id TEXT NOT NULL,
-    tag TEXT NOT NULL,
-    PRIMARY KEY (memory_id, tag),
-    FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_memory_tags_tag ON memory_tags(tag);
 
 -- ============================================
 -- PROJECTS

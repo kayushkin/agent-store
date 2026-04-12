@@ -294,12 +294,6 @@ func TestAgentDeletion(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Add memory referencing agent
-	agentID := agent.ID
-	if err := s.SaveMemory(&Memory{ID: "mem-1", Content: "test memory", Kind: "fact", Scope: "agent", Importance: 0.5, AgentID: &agentID}); err != nil {
-		t.Fatal(err)
-	}
-
 	// Delete agent
 	if err := s.DeleteAgent(agent.ID); err != nil {
 		t.Fatal(err)
@@ -336,15 +330,6 @@ func TestAgentDeletion(t *testing.T) {
 	}
 	if len(dists) != 0 {
 		t.Fatalf("expected 0 distributions, got %d", len(dists))
-	}
-
-	// Memory should still exist but with NULL agent_id
-	mem, err := s.GetMemory("mem-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if mem.AgentID != nil {
-		t.Fatalf("expected nil agent_id, got %d", *mem.AgentID)
 	}
 }
 

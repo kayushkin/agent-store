@@ -25,7 +25,7 @@ type inberAgentConfig struct {
 func main() {
 	inberPath := os.Getenv("INBER_PATH")
 	if inberPath == "" {
-		inberPath = os.ExpandEnv("$HOME/life/repos/inber")
+		inberPath = os.ExpandEnv("$HOME/repos/inber")
 	}
 
 	store, err := agentstore.Open("")

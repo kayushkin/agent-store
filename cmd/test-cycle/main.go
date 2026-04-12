@@ -58,7 +58,7 @@ func main() {
 		Content:     natureContent,
 		ContentHash: hash(natureContent),
 		Priority:    0,
-		SourcePath:  "~/life/repos/inber/agents/claxon/soul.md",
+		SourcePath:  "~/repos/inber/agents/claxon/soul.md",
 	}
 	if err := store.UpsertAgentNature(nature); err != nil {
 		log.Fatalf("upsert nature: %v", err)

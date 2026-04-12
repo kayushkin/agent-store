@@ -112,7 +112,7 @@ func main() {
 	inberRoot := os.Getenv("INBER_ROOT")
 	if inberRoot == "" {
 		home, _ := os.UserHomeDir()
-		inberRoot = filepath.Join(home, "life/repos/inber")
+		inberRoot = filepath.Join(home, "repos/inber")
 	}
 
 	// Read mapping.json
@@ -148,7 +148,7 @@ func main() {
 
 	// Seed orchestrators
 	orchs := []agentstore.Orchestrator{
-		{ID: "inber", DisplayName: "Inber", ConfigPath: "~/life/repos/inber/agents/"},
+		{ID: "inber", DisplayName: "Inber", ConfigPath: "~/repos/inber/agents/"},
 		{ID: "openclaw", DisplayName: "OpenClaw", ConfigPath: "~/.openclaw/openclaw.json"},
 		{ID: "dash", DisplayName: "Dash", APIEndpoint: "localhost:8101/api/agents"},
 	}

@@ -11,7 +11,7 @@ Single source of truth for agent identity, nature, and orchestrator configs.
 
 ## Also Responsible For
 
-- `~/life/repos/model-store` — credential and provider management
+- `~/repos/model-store` — credential and provider management
 
 ## Key Files
 
@@ -22,7 +22,7 @@ Single source of truth for agent identity, nature, and orchestrator configs.
 
 ## Orchestrator Sources
 
-- **Inber**: `~/life/repos/inber/agents/` directories + `agents.json` seed
+- **Inber**: `~/repos/inber/agents/` directories + `agents.json` seed
 - **OpenClaw**: `~/.openclaw/openclaw.json` → `agents.list[]`
 - **Dash registry**: Si API at `localhost:8101/api/agents`
 
