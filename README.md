@@ -2,95 +2,173 @@
 
 Single source of truth for agent identity, nature, and orchestrator configs.
 
-## Purpose
+Multiple orchestrators — inber, openclaw, dash — each have their own config formats and agent naming. agent-store provides a canonical registry so agents are defined once and configured per-orchestrator. It tracks identity (nature), runtime config (model, tools, limits), file distribution, and drift detection.
 
-Provides a unified database for orchestrators like inber and openclaw to:
-- Store agent identity and characteristics (nature)
-- Manage per-orchestrator runtime configs (model, tools, limits)
-- Track memories and learned knowledge
-- Share agents across orchestrators
+```
+  ┌─────────────────────────────────────────────────────────┐
+  │                    agent-store                          │
+  │                                                        │
+  │   Agents ──── canonical identity (slug, emoji, role)   │
+  │   Nature ──── personality content (identity, values)   │
+  │   Configs ─── per-orchestrator runtime settings        │
+  │   Tools ───── per-orchestrator tool assignments        │
+  │   Status ──── runtime state (idle, working, task)      │
+  │   Files ───── distribution tracking + drift detection  │
+  │                                                        │
+  ╚═══════════╤══════════════════╤═════════════════════════╝
+              │                  │
+     ┌────────▼────────┐  ┌─────▼──────────┐
+     │     inber        │  │   openclaw     │
+     │  (orchestrator)  │  │ (orchestrator) │
+     └─────────────────┘  └────────────────┘
+```
 
-## Location
-
-Default: `~/.config/agent-store/agents.db`
-
-## Schema
-
-### Core Tables
-
-| Table | Purpose |
-|-------|---------|
-| `nature` | Identity, principles, values, user context |
-| `agents` | Named entry points (claxon, bran, fionn...) |
-| `agent_nature` | Links agents to nature entries |
-| `orchestrators` | Orchestrator systems (inber, openclaw) |
-| `agent_configs` | Agent + orchestrator pairs |
-| `agent_config_values` | EAV config (model, thinking, etc.) |
-| `agent_tools` | Tool assignments per agent/orchestrator |
-| `agent_limits` | Turn/token limits |
-| `memories` | Learned knowledge and events |
-| `projects` | Project-scoped context |
-
-### Key Concepts
-
-**Nature** - Character definition (identity, principles, values). Not owned by agents, linked via `agent_nature`.
-
-**Agents** - Named entry points. Don't "own" nature, they reference it. Same agent can have different configs per orchestrator.
-
-**Orchestrator Config** - EAV-based runtime settings. `agent_config_values` for scalars, `agent_tools` for arrays, `agent_limits` for integers.
+Default database location: `~/.config/agent-store/agents.db`
 
 ## Usage
 
-```go
-import "github.com/kayushkin/agent-store"
+### As a library
 
-store, _ := agentstore.Open("")
+```go
+import agentstore "github.com/kayushkin/agent-store"
+
+store, _ := agentstore.Open("") // uses default path
 
 // Create agent
-store.UpsertAgent(agentstore.Agent{ID: "claxon", Name: "Claxon", Role: "main orchestrator"})
-
-// Create nature
-store.UpsertNature(agentstore.Nature{
-    ID:      "claxon-identity",
-    Content: "# Claxon 🦀\n\nI'm the main session agent...",
-    Kind:    "identity",
-    Scope:   "agent",
+store.UpsertAgent(&agentstore.Agent{
+    Slug:        "claxon",
+    DisplayName: "Claxon",
+    Emoji:       "🦀",
+    Role:        "main orchestrator",
+    Enabled:     true,
 })
 
-// Link agent to nature
-store.LinkNature("claxon", "claxon-identity", 0, true)
+// Add nature (identity content)
+store.UpsertAgentNature(&agentstore.AgentNature{
+    AgentID: claxon.ID,
+    Kind:    "identity",
+    Content: "# Claxon 🦀\nI'm the main session agent...",
+})
 
-// Set orchestrator config
-store.SetConfigValue("claxon", "inber", "model", "claude-opus-4-6")
-store.SetConfigValue("claxon", "inber", "thinking", "2048")
-store.AddTool("claxon", "inber", "shell", 0, true)
-store.AddTool("claxon", "inber", "spawn_agent", 0, true)
-store.SetLimit("claxon", "inber", "max_turns", 50)
+// Register with orchestrator
+store.UpsertAgentOrchestrator(&agentstore.AgentOrchestrator{
+    AgentID:              claxon.ID,
+    OrchestratorID:       "inber",
+    OrchestratorAgentID:  "claxon",
+    ModelPrimary:         "claude-opus-4-6",
+    ThinkingBudget:       2048,
+})
 
-// Get full config for runtime
-cfg, _ := store.GetAgentConfig("claxon", "inber")
-// cfg.Values["model"] == "claude-opus-4-6"
-// cfg.Tools = [{Tool: "shell", Enabled: true}, ...]
+// Set tools
+store.SetAgentTools(claxon.ID, "inber", []string{"shell", "spawn_agent", "file_read"})
 
-// Get agent's nature for prompt construction
-nature, _ := store.GetAgentNature("claxon")
+// Get full runtime config
+cfg, _ := store.GetFullAgentConfig("claxon", "inber")
+// cfg.Model, cfg.Tools, cfg.ThinkingBudget, cfg.NatureContent, ...
 ```
 
-## Nature Kinds
+### As an HTTP server
 
-| Kind | Scope | Description |
-|------|-------|-------------|
-| `identity` | agent | Who the agent is |
-| `principle` | global | How to operate |
-| `value` | global | What matters |
-| `user` | global | User context |
-| `project` | project | Project-specific knowledge |
+Register handlers on any `http.ServeMux`:
 
-## Memory Kinds
+```go
+store, _ := agentstore.Open("")
+agentstore.RegisterHandlers(mux, store)
+```
+
+When used with [llm-bridge-server](https://github.com/kayushkin/llm-bridge-server), the handlers are mounted automatically.
+
+## HTTP API
+
+### Agents
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/agents` | List all agents (add `?expanded=true` for per-orchestrator rows with status) |
+| `GET` | `/agents/{slug}` | Get single agent |
+| `POST` | `/agents` | Create agent |
+| `PUT` | `/agents/{slug}` | Update agent |
+| `DELETE` | `/agents/{slug}` | Delete agent (cascades to configs, nature, tools) |
+
+### Orchestrator configs
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/agents/{slug}/orchestrators` | Get orchestrator configs for agent |
+| `POST` | `/agents/{slug}/orchestrators` | Add/update orchestrator config |
+| `GET` | `/agents/{slug}/config` | Full runtime config (`?orchestrator=inber`) |
+| `GET` | `/configs` | All agent configs for an orchestrator (`?orchestrator=inber`) |
+
+### Operations
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/reconcile` | Check for missing registrations and file drift |
+| `GET` | `/agents/health` | Health check |
+
+## Schema
+
+### Core tables
+
+| Table | Purpose |
+|-------|---------|
+| `agents` | Canonical agent definitions — slug, display name, emoji, role |
+| `orchestrators` | Orchestrator systems (inber, openclaw, dash) with default agent and endpoint |
+| `agent_orchestrators` | Agent-to-orchestrator configs — model, thinking budget, context tags, limits |
+| `agent_tools` | Tool assignments per agent/orchestrator pair |
+| `agent_nature` | Identity and personality content (kind: identity, principle, value, user, project) |
+| `agent_name_aliases` | Alternative names per context for agent resolution |
+| `agent_system_prompt_refs` | Tracks which agents appear in other agents' system prompts |
+| `agent_status` | Runtime status (idle, working) with task and session tracking |
+| `projects` | Project grouping with slug, name, path |
+| `project_nature` | Links projects to nature entries with priority |
+| `file_distributions` | Tracks files distributed to orchestrators with content hashes |
+| `file_scans` | Drift detection — compares current file hash against distributed hash |
+
+### Key concepts
+
+**Agents** are identified by slug (e.g. `claxon`, `brigid`, `fionn`). The same agent can have different configs per orchestrator — different model, different tools, different limits.
+
+**Nature** is the agent's personality content, organized by kind:
 
 | Kind | Description |
 |------|-------------|
-| `lesson` | Something learned from experience |
-| `knowledge` | Factual information |
-| `event` | Something that happened |
-| `observation` | Noted pattern or behavior |
+| `identity` | Who the agent is |
+| `principle` | How to operate |
+| `value` | What matters |
+| `user` | User context |
+| `project` | Project-specific knowledge |
+
+**File distribution** tracks when nature content is written out to orchestrator config files (e.g. soul.md). **File scans** detect when those files have been externally modified, enabling a bidirectional sync loop.
+
+## CLI tools
+
+### `cmd/seed`
+
+Populates agent-store from existing config files:
+
+```bash
+go run ./cmd/seed
+```
+
+Reads from `mapping.json`, `inber/agents.json`, and agent soul files to bootstrap the database.
+
+### `cmd/test-cycle`
+
+Exercises the full nature → distribute → scan → drift detection cycle:
+
+```bash
+go run ./cmd/test-cycle
+```
+
+### `cmd/migrate-inber`
+
+One-time migration of configs from inber to agent-store:
+
+```bash
+go run ./cmd/migrate-inber
+```
+
+## Part of the llm-bridge ecosystem
+
+agent-store is one of several optional stores used by [llm-bridge-server](https://github.com/kayushkin/llm-bridge-server). See the [llm-bridge](https://github.com/kayushkin/llm-bridge) README for the full ecosystem.
