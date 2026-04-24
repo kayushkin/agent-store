@@ -208,3 +208,29 @@ CREATE TABLE IF NOT EXISTS agent_status (
     FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
     FOREIGN KEY (orchestrator_id) REFERENCES orchestrators(id) ON DELETE CASCADE
 );
+
+-- ============================================
+-- TRACKED FILES (disk-is-truth index for CC/agent config files)
+-- ============================================
+-- path = canonical path (without .disabled suffix).
+-- enabled=0 means the file lives at path+".disabled" on disk.
+-- DB stores no content; GET /files/{id}/content reads from disk live.
+
+CREATE TABLE IF NOT EXISTS tracked_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    path TEXT UNIQUE NOT NULL,
+    scope TEXT NOT NULL,                    -- global, project, subagent, memory, inber
+    agent_slug TEXT,                        -- nullable; matched from filename stem
+    enabled INTEGER NOT NULL DEFAULT 1,
+    fs_hash TEXT,
+    size INTEGER,
+    mtime INTEGER,
+    last_scanned_at INTEGER,
+    status TEXT NOT NULL DEFAULT 'present', -- present, missing
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tracked_files_scope ON tracked_files(scope);
+CREATE INDEX IF NOT EXISTS idx_tracked_files_agent ON tracked_files(agent_slug);
+CREATE INDEX IF NOT EXISTS idx_tracked_files_status ON tracked_files(status);

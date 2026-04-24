@@ -3,7 +3,9 @@ package agentstore
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -28,6 +30,14 @@ func RegisterHandlers(mux *http.ServeMux, s *Store) {
 	mux.HandleFunc("GET /agents/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]string{"status": "ok"})
 	})
+
+	mux.HandleFunc("GET /files", h.listFiles)
+	mux.HandleFunc("GET /files/{id}", h.getFile)
+	mux.HandleFunc("GET /files/{id}/content", h.getFileContent)
+	mux.HandleFunc("PUT /files/{id}/content", h.putFileContent)
+	mux.HandleFunc("POST /files/{id}/enable", h.enableFile)
+	mux.HandleFunc("POST /files/{id}/disable", h.disableFile)
+	mux.HandleFunc("POST /files/scan", h.scanFiles)
 }
 
 type handler struct {
@@ -309,3 +319,113 @@ func (h *handler) reconcile(w http.ResponseWriter, r *http.Request) {
 }
 
 var _ = strings.Join // keep import
+
+// === Tracked files ===
+
+func parseID(r *http.Request) (int64, error) {
+	return strconv.ParseInt(r.PathValue("id"), 10, 64)
+}
+
+func (h *handler) listFiles(w http.ResponseWriter, r *http.Request) {
+	scope := r.URL.Query().Get("scope")
+	agentSlug := r.URL.Query().Get("agent_slug")
+	files, err := h.s.ListTrackedFiles(scope, agentSlug)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, files)
+}
+
+func (h *handler) getFile(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		writeErr(w, 400, "bad id")
+		return
+	}
+	f, err := h.s.GetTrackedFile(id)
+	if err != nil {
+		writeErr(w, 404, err.Error())
+		return
+	}
+	writeJSON(w, 200, f)
+}
+
+func (h *handler) getFileContent(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		writeErr(w, 400, "bad id")
+		return
+	}
+	f, data, err := h.s.ReadTrackedFile(id)
+	if err != nil {
+		writeErr(w, 404, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"id":      f.ID,
+		"path":    f.Path,
+		"enabled": f.Enabled,
+		"content": string(data),
+	})
+}
+
+func (h *handler) putFileContent(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		writeErr(w, 400, "bad id")
+		return
+	}
+	var body struct {
+		Content string `json:"content"`
+	}
+	raw, _ := io.ReadAll(r.Body)
+	if err := json.Unmarshal(raw, &body); err != nil {
+		writeErr(w, 400, "invalid json")
+		return
+	}
+	f, err := h.s.WriteTrackedFile(id, []byte(body.Content))
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, f)
+}
+
+func (h *handler) enableFile(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		writeErr(w, 400, "bad id")
+		return
+	}
+	f, err := h.s.SetTrackedFileEnabled(id, true)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, f)
+}
+
+func (h *handler) disableFile(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		writeErr(w, 400, "bad id")
+		return
+	}
+	f, err := h.s.SetTrackedFileEnabled(id, false)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, f)
+}
+
+func (h *handler) scanFiles(w http.ResponseWriter, r *http.Request) {
+	res, err := h.s.Scan()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, res)
+}
+
