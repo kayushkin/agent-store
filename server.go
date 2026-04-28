@@ -12,8 +12,10 @@ import (
 // RegisterHandlers registers all HTTP handlers on the given mux.
 // Memory handlers have moved to memory-store.
 func RegisterHandlers(mux *http.ServeMux, s *Store) {
-	h := &handler{s: s}
+	registerWithHandler(mux, &handler{s: s})
+}
 
+func registerWithHandler(mux *http.ServeMux, h *handler) {
 	mux.HandleFunc("GET /agents", h.listAgents)
 	mux.HandleFunc("GET /agents/{slug}", h.getAgent)
 	mux.HandleFunc("POST /agents", h.createAgent)
@@ -38,10 +40,38 @@ func RegisterHandlers(mux *http.ServeMux, s *Store) {
 	mux.HandleFunc("POST /files/{id}/enable", h.enableFile)
 	mux.HandleFunc("POST /files/{id}/disable", h.disableFile)
 	mux.HandleFunc("POST /files/scan", h.scanFiles)
+
+	// History (every UI save / drift / runner-detected change is a version row).
+	mux.HandleFunc("GET /files/{id}/versions", h.listFileVersions)
+	mux.HandleFunc("GET /versions/{vid}/content", h.getVersionContent)
+
+	// Per-machine seeding for remote runners.
+	mux.HandleFunc("GET /seed/profiles", h.listSeedProfiles)
+	mux.HandleFunc("GET /seed/profile", h.getSeedProfile)
+	mux.HandleFunc("PUT /seed/profile", h.putSeedProfile)
+	mux.HandleFunc("GET /seed/manifest", h.getSeedManifest)
+	mux.HandleFunc("POST /seed/observe", h.postSeedObserve)
+	mux.HandleFunc("POST /seed/drift", h.postSeedDrift)
+	mux.HandleFunc("GET /seed/state", h.getSeedState)
+
+	mux.HandleFunc("GET /context/resolve", h.resolveContext)
 }
 
 type handler struct {
 	s *Store
+	// onFileSaved is invoked after a successful PUT /files/{id}/content. Wired
+	// by llm-bridge-server (which embeds agent-store) to broadcast seed deltas
+	// to every connected runner. nil = no broadcast (standalone agent-store
+	// invocation, or a deployment without runners).
+	onFileSaved   func(*TrackedFile, *TrackedFileVersion)
+	onScanCompleted func(*ScanResult)
+}
+
+// RegisterHandlersWithHooks is RegisterHandlers plus seed-broadcast hooks.
+// Bridge-server wraps with hooks so saves and scans propagate to runners;
+// standalone agent-store uses RegisterHandlers and the hooks stay nil.
+func RegisterHandlersWithHooks(mux *http.ServeMux, s *Store, onSave func(*TrackedFile, *TrackedFileVersion), onScan func(*ScanResult)) {
+	registerWithHandler(mux, &handler{s: s, onFileSaved: onSave, onScanCompleted: onScan})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -378,16 +408,20 @@ func (h *handler) putFileContent(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Content string `json:"content"`
+		Note    string `json:"note,omitempty"`
 	}
 	raw, _ := io.ReadAll(r.Body)
 	if err := json.Unmarshal(raw, &body); err != nil {
 		writeErr(w, 400, "invalid json")
 		return
 	}
-	f, err := h.s.WriteTrackedFile(id, []byte(body.Content))
+	f, v, err := h.s.WriteTrackedFileVersioned(id, []byte(body.Content), VersionSourceUISave, "", body.Note)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
+	}
+	if h.onFileSaved != nil && v != nil {
+		h.onFileSaved(f, v)
 	}
 	writeJSON(w, 200, f)
 }
@@ -426,6 +460,203 @@ func (h *handler) scanFiles(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	if h.onScanCompleted != nil {
+		h.onScanCompleted(res)
+	}
 	writeJSON(w, 200, res)
+}
+
+// === Context resolver ===
+
+func (h *handler) resolveContext(w http.ResponseWriter, r *http.Request) {
+	harness := r.URL.Query().Get("harness")
+	workDir := r.URL.Query().Get("work_dir")
+	if harness == "" {
+		writeErr(w, 400, "harness query param required")
+		return
+	}
+	res, err := h.s.ResolveContext(harness, workDir)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, res)
+}
+
+// === File versions (full history) ===
+
+func (h *handler) listFileVersions(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		writeErr(w, 400, "bad id")
+		return
+	}
+	versions, err := h.s.ListVersions(id)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if versions == nil {
+		versions = []TrackedFileVersion{}
+	}
+	writeJSON(w, 200, versions)
+}
+
+func (h *handler) getVersionContent(w http.ResponseWriter, r *http.Request) {
+	vid, err := strconv.ParseInt(r.PathValue("vid"), 10, 64)
+	if err != nil {
+		writeErr(w, 400, "bad version id")
+		return
+	}
+	v, err := h.s.GetVersion(vid)
+	if err != nil {
+		writeErr(w, 404, err.Error())
+		return
+	}
+	data, err := h.s.ReadVersionContent(vid)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"version": v,
+		"content": string(data),
+	})
+}
+
+// === Per-machine seed profiles ===
+
+func (h *handler) listSeedProfiles(w http.ResponseWriter, r *http.Request) {
+	profiles, err := h.s.ListSeedProfiles()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if profiles == nil {
+		profiles = []MachineSeedProfile{}
+	}
+	writeJSON(w, 200, profiles)
+}
+
+func (h *handler) getSeedProfile(w http.ResponseWriter, r *http.Request) {
+	machineID := r.URL.Query().Get("machine_id")
+	if machineID == "" {
+		writeErr(w, 400, "machine_id required")
+		return
+	}
+	prof, err := h.s.EnsureSeedProfile(machineID)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, prof)
+}
+
+func (h *handler) putSeedProfile(w http.ResponseWriter, r *http.Request) {
+	machineID := r.URL.Query().Get("machine_id")
+	if machineID == "" {
+		writeErr(w, 400, "machine_id required")
+		return
+	}
+	var body struct {
+		Scopes []string `json:"scopes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, 400, "invalid json")
+		return
+	}
+	prof, err := h.s.SetSeedProfileScopes(machineID, body.Scopes)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, prof)
+}
+
+func (h *handler) getSeedManifest(w http.ResponseWriter, r *http.Request) {
+	machineID := r.URL.Query().Get("machine_id")
+	if machineID == "" {
+		writeErr(w, 400, "machine_id required")
+		return
+	}
+	mf, err := h.s.BuildSeedManifest(machineID)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, mf)
+}
+
+func (h *handler) postSeedObserve(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		MachineID     string `json:"machine_id"`
+		TrackedFileID int64  `json:"tracked_file_id"`
+		SHA256        string `json:"sha256"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, 400, "invalid json")
+		return
+	}
+	if body.MachineID == "" || body.TrackedFileID == 0 {
+		writeErr(w, 400, "machine_id and tracked_file_id required")
+		return
+	}
+	if err := h.s.RecordObservedHash(body.MachineID, body.TrackedFileID, body.SHA256); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]string{"status": "ok"})
+}
+
+// postSeedDrift is the runner's pre-overwrite safety hook. The runner POSTs
+// the local on-disk content it found that doesn't match what the bridge most
+// recently pushed. The bridge appends it as a runner-drift version (so it
+// joins the file's history forever) and returns the version row.
+//
+// Only after this call returns success should the runner proceed with the
+// overwrite.
+func (h *handler) postSeedDrift(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		MachineID     string `json:"machine_id"`
+		TrackedFileID int64  `json:"tracked_file_id"`
+		Content       string `json:"content"`
+		Note          string `json:"note,omitempty"`
+	}
+	raw, _ := io.ReadAll(r.Body)
+	if err := json.Unmarshal(raw, &body); err != nil {
+		writeErr(w, 400, "invalid json")
+		return
+	}
+	if body.MachineID == "" || body.TrackedFileID == 0 {
+		writeErr(w, 400, "machine_id and tracked_file_id required")
+		return
+	}
+	v, err := h.s.AppendVersion(body.TrackedFileID, []byte(body.Content), VersionSourceRunnerDrift, body.MachineID, body.Note)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if err := h.s.RecordObservedHash(body.MachineID, body.TrackedFileID, v.SHA256); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, v)
+}
+
+func (h *handler) getSeedState(w http.ResponseWriter, r *http.Request) {
+	machineID := r.URL.Query().Get("machine_id")
+	if machineID == "" {
+		writeErr(w, 400, "machine_id required")
+		return
+	}
+	state, err := h.s.ListSeedStateForMachine(machineID)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if state == nil {
+		state = []MachineSeedState{}
+	}
+	writeJSON(w, 200, state)
 }
 

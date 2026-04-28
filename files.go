@@ -100,8 +100,9 @@ func classifyFile(absPath, home string) (string, bool) {
 		return "", false
 	}
 
-	if absPath == filepath.Join(home, "CLAUDE.md") ||
-		absPath == filepath.Join(home, "CLAUDE.md.disabled") {
+	// Well-known agent-config files placed directly in $HOME are treated as
+	// global. Anywhere else they're project-scoped.
+	if filepath.Dir(absPath) == home && agentFileNames[base] {
 		return "global", true
 	}
 
@@ -209,9 +210,20 @@ func (s *Store) Scan() (*ScanResult, error) {
 			return
 		}
 		slug := s.agentSlugFromPath(canon, scope)
-		added, err := s.upsertTrackedFile(canon, scope, slug, enabled, hash, size, mtime)
+		fileID, added, err := s.upsertTrackedFile(canon, scope, slug, enabled, hash, size, mtime)
 		if err != nil {
 			return
+		}
+		// History capture: if the on-disk hash isn't already in our version log
+		// for this file, ingest it as scan-import. Catches first-discovery and
+		// out-of-band edits between scans without losing anything.
+		if fileID > 0 {
+			existing, err := s.FindVersionByHash(fileID, hash)
+			if err == nil && existing == nil {
+				if data, err := os.ReadFile(path); err == nil {
+					_, _ = s.AppendVersion(fileID, data, VersionSourceScanImport, "", "")
+				}
+			}
 		}
 		res.Scanned++
 		if added {
@@ -282,7 +294,9 @@ func (s *Store) Scan() (*ScanResult, error) {
 	return res, nil
 }
 
-func (s *Store) upsertTrackedFile(path, scope, agentSlug string, enabled bool, hash string, size, mtime int64) (bool, error) {
+// upsertTrackedFile inserts or updates the row for `path` and returns
+// (id, added, err). `added` is true when the row was newly inserted.
+func (s *Store) upsertTrackedFile(path, scope, agentSlug string, enabled bool, hash string, size, mtime int64) (int64, bool, error) {
 	var id int64
 	err := s.db.QueryRow("SELECT id FROM tracked_files WHERE path = ?", path).Scan(&id)
 	if err == nil {
@@ -291,13 +305,17 @@ func (s *Store) upsertTrackedFile(path, scope, agentSlug string, enabled bool, h
 			SET scope=?, agent_slug=?, enabled=?, fs_hash=?, size=?, mtime=?, last_scanned_at=?, status='present', updated_at=?
 			WHERE id=?`,
 			scope, nullIfEmpty(agentSlug), boolToInt(enabled), hash, size, mtime, now(), now(), id)
-		return false, err
+		return id, false, err
 	}
-	_, err = s.db.Exec(`
+	res, err := s.db.Exec(`
 		INSERT INTO tracked_files (path, scope, agent_slug, enabled, fs_hash, size, mtime, last_scanned_at, status, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'present', ?, ?)`,
 		path, scope, nullIfEmpty(agentSlug), boolToInt(enabled), hash, size, mtime, now(), now(), now())
-	return true, err
+	if err != nil {
+		return 0, false, err
+	}
+	id, _ = res.LastInsertId()
+	return id, true, nil
 }
 
 func nullIfEmpty(s string) any {
@@ -373,19 +391,38 @@ func (s *Store) ReadTrackedFile(id int64) (*TrackedFile, []byte, error) {
 }
 
 // WriteTrackedFile writes new content to disk and updates the row's hash/size/mtime.
+// Use WriteTrackedFileVersioned for UI-attributed writes that should appear in history.
 func (s *Store) WriteTrackedFile(id int64, content []byte) (*TrackedFile, error) {
+	f, _, err := s.WriteTrackedFileVersioned(id, content, VersionSourceUISave, "", "")
+	return f, err
+}
+
+// WriteTrackedFileVersioned writes new content to disk and ensures full history
+// is captured. Before overwriting, if the on-disk content's hash differs from
+// the most recent recorded version, that pre-existing content is appended as a
+// scan-import version — so a user's out-of-band edit is never silently lost.
+// After writing, the new content is appended as a version tagged with `source`.
+//
+// machineID and note are passed straight through to the version row (use ""
+// for UI saves).
+func (s *Store) WriteTrackedFileVersioned(id int64, content []byte, source, machineID, note string) (*TrackedFile, *TrackedFileVersion, error) {
 	f, err := s.GetTrackedFile(id)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+
+	if err := s.captureExistingIfNew(f); err != nil {
+		return nil, nil, fmt.Errorf("capture pre-existing: %w", err)
+	}
+
 	diskPath := f.DiskPath()
 	tmp := diskPath + ".tmp"
 	if err := os.WriteFile(tmp, content, 0644); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := os.Rename(tmp, diskPath); err != nil {
 		os.Remove(tmp)
-		return nil, err
+		return nil, nil, err
 	}
 	sum := sha256.Sum256(content)
 	hash := hex.EncodeToString(sum[:])
@@ -395,12 +432,47 @@ func (s *Store) WriteTrackedFile(id int64, content []byte) (*TrackedFile, error)
 		size = info.Size()
 		mtime = info.ModTime().Unix()
 	}
-	_, err = s.db.Exec("UPDATE tracked_files SET fs_hash=?, size=?, mtime=?, last_scanned_at=?, status='present', updated_at=? WHERE id=?",
-		hash, size, mtime, now(), now(), id)
-	if err != nil {
-		return nil, err
+	if _, err := s.db.Exec("UPDATE tracked_files SET fs_hash=?, size=?, mtime=?, last_scanned_at=?, status='present', updated_at=? WHERE id=?",
+		hash, size, mtime, now(), now(), id); err != nil {
+		return nil, nil, err
 	}
-	return s.GetTrackedFile(id)
+
+	v, err := s.AppendVersion(id, content, source, machineID, note)
+	if err != nil {
+		return nil, nil, fmt.Errorf("append version: %w", err)
+	}
+	updated, err := s.GetTrackedFile(id)
+	if err != nil {
+		return nil, nil, err
+	}
+	return updated, v, nil
+}
+
+// captureExistingIfNew reads the current on-disk bytes for f and, if their
+// hash isn't already represented in tracked_file_versions for this file,
+// appends them as a scan-import version. This is the safety net that makes
+// every overwrite non-destructive: even if the bridge missed a manual edit
+// between our last knowledge and now, that content lands in history before
+// we clobber it.
+//
+// Missing files and read errors are swallowed: there's nothing to capture.
+func (s *Store) captureExistingIfNew(f *TrackedFile) error {
+	data, err := os.ReadFile(f.DiskPath())
+	if err != nil {
+		return nil
+	}
+	sum := sha256.Sum256(data)
+	sha := hex.EncodeToString(sum[:])
+
+	existing, err := s.FindVersionByHash(f.ID, sha)
+	if err != nil {
+		return err
+	}
+	if existing != nil {
+		return nil
+	}
+	_, err = s.AppendVersion(f.ID, data, VersionSourceScanImport, "", "captured before overwrite")
+	return err
 }
 
 // SetTrackedFileEnabled renames on disk (canonical ↔ .disabled) and updates the row.
