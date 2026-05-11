@@ -1,8 +1,8 @@
 # agent-store
 
-Single source of truth for agent identity, nature, and orchestrator configs.
+Single source of truth for agent identity, nature, and harness configs.
 
-Multiple orchestrators — inber, openclaw, dash — each have their own config formats and agent naming. agent-store provides a canonical registry so agents are defined once and configured per-orchestrator. It tracks identity (nature), runtime config (model, tools, limits), file distribution, and drift detection.
+Multiple harnesses — inber, openclaw, dash — each have their own config formats and agent naming. agent-store provides a canonical registry so agents are defined once and configured per-harness. It tracks identity (nature), runtime config (model, tools, limits), file distribution, and drift detection.
 
 ```
   ┌─────────────────────────────────────────────────────────┐
@@ -10,8 +10,8 @@ Multiple orchestrators — inber, openclaw, dash — each have their own config 
   │                                                        │
   │   Agents ──── canonical identity (slug, emoji, role)   │
   │   Nature ──── personality content (identity, values)   │
-  │   Configs ─── per-orchestrator runtime settings        │
-  │   Tools ───── per-orchestrator tool assignments        │
+  │   Configs ─── per-harness runtime settings        │
+  │   Tools ───── per-harness tool assignments        │
   │   Status ──── runtime state (idle, working, task)      │
   │   Files ───── distribution tracking + drift detection  │
   │                                                        │
@@ -19,7 +19,7 @@ Multiple orchestrators — inber, openclaw, dash — each have their own config 
               │                  │
      ┌────────▼────────┐  ┌─────▼──────────┐
      │     inber        │  │   openclaw     │
-     │  (orchestrator)  │  │ (orchestrator) │
+     │  (harness)  │  │ (harness) │
      └─────────────────┘  └────────────────┘
 ```
 
@@ -39,7 +39,7 @@ store.UpsertAgent(&agentstore.Agent{
     Slug:        "claxon",
     DisplayName: "Claxon",
     Emoji:       "🦀",
-    Role:        "main orchestrator",
+    Role:        "main harness",
     Enabled:     true,
 })
 
@@ -50,7 +50,7 @@ store.UpsertAgentNature(&agentstore.AgentNature{
     Content: "# Claxon 🦀\nI'm the main session agent...",
 })
 
-// Register with orchestrator
+// Register with harness
 store.UpsertAgentOrchestrator(&agentstore.AgentOrchestrator{
     AgentID:              claxon.ID,
     OrchestratorID:       "inber",
@@ -84,7 +84,7 @@ When used with [llm-bridge-server](https://github.com/kayushkin/llm-bridge-serve
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/agents` | List all agents (add `?expanded=true` for per-orchestrator rows with status) |
+| `GET` | `/agents` | List all agents (add `?expanded=true` for per-harness rows with status) |
 | `GET` | `/agents/{slug}` | Get single agent |
 | `POST` | `/agents` | Create agent |
 | `PUT` | `/agents/{slug}` | Update agent |
@@ -94,10 +94,10 @@ When used with [llm-bridge-server](https://github.com/kayushkin/llm-bridge-serve
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/agents/{slug}/orchestrators` | Get orchestrator configs for agent |
-| `POST` | `/agents/{slug}/orchestrators` | Add/update orchestrator config |
-| `GET` | `/agents/{slug}/config` | Full runtime config (`?orchestrator=inber`) |
-| `GET` | `/configs` | All agent configs for an orchestrator (`?orchestrator=inber`) |
+| `GET` | `/agents/{slug}/harnesses` | Get harness configs for agent |
+| `POST` | `/agents/{slug}/harnesses` | Add/update harness config |
+| `GET` | `/agents/{slug}/config` | Full runtime config (`?harness=inber`) |
+| `GET` | `/configs` | All agent configs for an harness (`?harness=inber`) |
 
 ### Operations
 
@@ -113,21 +113,21 @@ When used with [llm-bridge-server](https://github.com/kayushkin/llm-bridge-serve
 | Table | Purpose |
 |-------|---------|
 | `agents` | Canonical agent definitions — slug, display name, emoji, role |
-| `orchestrators` | Orchestrator systems (inber, openclaw, dash) with default agent and endpoint |
-| `agent_orchestrators` | Agent-to-orchestrator configs — model, thinking budget, context tags, limits |
-| `agent_tools` | Tool assignments per agent/orchestrator pair |
+| `harnesses` | Orchestrator systems (inber, openclaw, dash) with default agent and endpoint |
+| `agent_harnesses` | Agent-to-harness configs — model, thinking budget, context tags, limits |
+| `agent_tools` | Tool assignments per agent/harness pair |
 | `agent_nature` | Identity and personality content (kind: identity, principle, value, user, project) |
 | `agent_name_aliases` | Alternative names per context for agent resolution |
 | `agent_system_prompt_refs` | Tracks which agents appear in other agents' system prompts |
 | `agent_status` | Runtime status (idle, working) with task and session tracking |
 | `projects` | Project grouping with slug, name, path |
 | `project_nature` | Links projects to nature entries with priority |
-| `file_distributions` | Tracks files distributed to orchestrators with content hashes |
+| `file_distributions` | Tracks files distributed to harnesses with content hashes |
 | `file_scans` | Drift detection — compares current file hash against distributed hash |
 
 ### Key concepts
 
-**Agents** are identified by slug (e.g. `claxon`, `brigid`, `fionn`). The same agent can have different configs per orchestrator — different model, different tools, different limits.
+**Agents** are identified by slug (e.g. `claxon`, `brigid`, `fionn`). The same agent can have different configs per harness — different model, different tools, different limits.
 
 **Nature** is the agent's personality content, organized by kind:
 
@@ -139,7 +139,7 @@ When used with [llm-bridge-server](https://github.com/kayushkin/llm-bridge-serve
 | `user` | User context |
 | `project` | Project-specific knowledge |
 
-**File distribution** tracks when nature content is written out to orchestrator config files (e.g. soul.md). **File scans** detect when those files have been externally modified, enabling a bidirectional sync loop.
+**File distribution** tracks when nature content is written out to harness config files (e.g. soul.md). **File scans** detect when those files have been externally modified, enabling a bidirectional sync loop.
 
 ## CLI tools
 

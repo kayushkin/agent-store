@@ -34,24 +34,24 @@ func main() {
 	// 2. Resolve by openclaw alias "main"
 	agent2, err := store.ResolveAgentName("main")
 	if err != nil {
-		// "main" is the orchestrator_agent_id, not an alias — check if that works
+		// "main" is the harness_agent_id, not an alias — check if that works
 		fmt.Printf("⚠ ResolveAgentName('main') failed: %v (expected — it's an orch ID not alias)\n", err)
 	} else {
 		fmt.Printf("✓ Resolved 'main' → id=%d slug=%s\n", agent2.ID, agent2.Slug)
 	}
 
-	// 3. Get orchestrator mappings
-	orchs, err := store.GetAgentOrchestrators(agent.ID)
+	// 3. Get harness mappings
+	orchs, err := store.GetAgentHarnesses(agent.ID)
 	if err != nil {
 		log.Fatalf("get orch: %v", err)
 	}
-	fmt.Printf("✓ Claxon has %d orchestrator mappings:\n", len(orchs))
+	fmt.Printf("✓ Claxon has %d harness mappings:\n", len(orchs))
 	for _, o := range orchs {
-		fmt.Printf("  - %s → %q (model: %s)\n", o.OrchestratorID, o.OrchestratorAgentID, o.ModelPrimary)
+		fmt.Printf("  - %s → %q (model: %s)\n", o.HarnessID, o.HarnessAgentID, o.ModelPrimary)
 	}
 
 	// 4. Add nature content for claxon
-	natureContent := "# Claxon 🦀\n\nThe main orchestrator. Direct, no fluff.\n"
+	natureContent := "# Claxon 🦀\n\nThe main harness. Direct, no fluff.\n"
 	nature := &agentstore.AgentNature{
 		AgentID:     agent.ID,
 		Kind:        "identity",
@@ -85,7 +85,7 @@ func main() {
 	fmt.Printf("✓ Scan %d: unchanged (hashes match)\n", scanID1)
 
 	// 7. Simulate external edit (someone edits soul.md directly)
-	editedContent := "# Claxon 🦀\n\nThe main orchestrator. Direct, no fluff. Also likes crabs.\n"
+	editedContent := "# Claxon 🦀\n\nThe main harness. Direct, no fluff. Also likes crabs.\n"
 	os.WriteFile(filePath, []byte(editedContent), 0644)
 	newHash := hash(editedContent)
 

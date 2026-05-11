@@ -58,15 +58,61 @@ func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) DB() *sql.DB  { return s.db }
 
 func (s *Store) migrate() error {
+	// Pre-schema renames (2026-05-11): must run BEFORE schemaSQL, otherwise
+	// the CREATE TABLE IF NOT EXISTS in schemaSQL would create empty new-name
+	// tables alongside the existing old-name ones, splitting data.
+	//
+	// Partial-state recovery: if a previous migration attempt got far enough
+	// to run schemaSQL but didn't complete the renames, we'll have empty
+	// new-name placeholder tables blocking the RENAME. Drop those first when
+	// the old-name table still has data to migrate.
+	renamePairs := []struct{ oldName, newName string }{
+		{"orchestrators", "harness"},
+		{"agent_orchestrators", "agent_harness"},
+		{"agent_tools", "agent_harness_tools"},
+	}
+	for _, p := range renamePairs {
+		var oldExists, newExists int
+		s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, p.oldName).Scan(&oldExists)
+		s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, p.newName).Scan(&newExists)
+		if oldExists == 1 && newExists == 1 {
+			// Both exist; drop the new-name table if it's empty (placeholder from a previously failed migration).
+			var rowCount int
+			if err := s.db.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM "%s"`, p.newName)).Scan(&rowCount); err == nil && rowCount == 0 {
+				s.db.Exec(fmt.Sprintf(`DROP TABLE IF EXISTS "%s"`, p.newName))
+			}
+		}
+	}
+	preMigrations := []string{
+		// Table renames (FROM old name TO new name)
+		"ALTER TABLE orchestrators RENAME TO harness",
+		"ALTER TABLE agent_orchestrators RENAME TO agent_harness",
+		"ALTER TABLE agent_tools RENAME TO agent_harness_tools",
+		// Column renames (FROM old name TO new name, run after table renames)
+		"ALTER TABLE agent_harness RENAME COLUMN orchestrator_id TO harness_id",
+		"ALTER TABLE agent_harness RENAME COLUMN orchestrator_agent_id TO harness_agent_id",
+		"ALTER TABLE agent_harness_tools RENAME COLUMN orchestrator_id TO harness_id",
+		"ALTER TABLE agent_system_prompt_refs RENAME COLUMN orchestrator_id TO harness_id",
+		"ALTER TABLE file_distributions RENAME COLUMN orchestrator_id TO harness_id",
+		"ALTER TABLE agent_status RENAME COLUMN orchestrator_id TO harness_id",
+		// Drop the old index names; new indexes are created by schemaSQL.
+		"DROP INDEX IF EXISTS idx_agent_orch_orch",
+		"DROP INDEX IF EXISTS idx_file_dist_orch",
+		// Add parent_agent_id BEFORE schemaSQL runs so the CREATE INDEX in schema can succeed.
+		"ALTER TABLE agents ADD COLUMN parent_agent_id INTEGER REFERENCES agents(id) ON DELETE SET NULL",
+	}
+	for _, m := range preMigrations {
+		s.db.Exec(m) // ignore errors when rename already happened, table never existed, or column already renamed
+	}
 	if _, err := s.db.Exec(schemaSQL); err != nil {
 		return err
 	}
-	// Add columns that may not exist in older databases
-	migrations := []string{
-		"ALTER TABLE agent_orchestrators ADD COLUMN is_default INTEGER DEFAULT 0",
-		"ALTER TABLE agent_orchestrators ADD COLUMN subagent_allow TEXT",
+	// Post-schema migrations: add columns that may not exist in older databases.
+	postMigrations := []string{
+		"ALTER TABLE agent_harness ADD COLUMN is_default INTEGER DEFAULT 0",
+		"ALTER TABLE agent_harness ADD COLUMN subagent_allow TEXT",
 	}
-	for _, m := range migrations {
+	for _, m := range postMigrations {
 		s.db.Exec(m) // ignore "duplicate column" errors
 	}
 	return nil
@@ -168,8 +214,8 @@ func (s *Store) ListAgents() ([]Agent, error) {
 	return out, rows.Err()
 }
 
-// AgentWithOrchestrator is an agent entry expanded per orchestrator.
-type AgentWithOrchestrator struct {
+// AgentWithHarness is an agent entry expanded per harness.
+type AgentWithHarness struct {
 	Slug             string
 	DisplayName      string
 	Emoji            string
@@ -177,38 +223,38 @@ type AgentWithOrchestrator struct {
 	Description      string
 	Role             string
 	Enabled          bool
-	Orchestrator     string // orchestrator ID
-	OrchestratorName string // what the orchestrator calls this agent
+	Harness     string // harness ID
+	HarnessName string // what the harness calls this agent
 	Model            string
-	IsDefault        bool   // true if this is the orchestrator's default agent
-	OrchEmoji        string // orchestrator emoji
+	IsDefault        bool   // true if this is the harness's default agent
+	HarnessEmoji        string // harness emoji
 }
 
-// ListAgentsExpanded returns one row per agent+orchestrator pair.
-func (s *Store) ListAgentsExpanded() ([]AgentWithOrchestrator, error) {
+// ListAgentsExpanded returns one row per agent+harness pair.
+func (s *Store) ListAgentsExpanded() ([]AgentWithHarness, error) {
 	rows, err := s.db.Query(`
 		SELECT a.slug, COALESCE(a.display_name,''), COALESCE(a.emoji,''), COALESCE(a.projects,''),
 		       COALESCE(a.description,''), COALESCE(a.role,''), a.enabled,
-		       ao.orchestrator_id, ao.orchestrator_agent_id, COALESCE(ao.model_primary, ''),
+		       ao.harness_id, ao.harness_agent_id, COALESCE(ao.model_primary, ''),
 		       CASE WHEN o.default_agent_id = a.id THEN 1 ELSE 0 END,
 		       COALESCE(o.emoji, '')
 		FROM agents a
-		JOIN agent_orchestrators ao ON a.id = ao.agent_id
-		LEFT JOIN orchestrators o ON o.id = ao.orchestrator_id
+		JOIN agent_harness ao ON a.id = ao.agent_id
+		LEFT JOIN harness o ON o.id = ao.harness_id
 		WHERE ao.shelved = 0
-		ORDER BY ao.orchestrator_id, a.slug
+		ORDER BY ao.harness_id, a.slug
 	`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var out []AgentWithOrchestrator
+	var out []AgentWithHarness
 	for rows.Next() {
-		var a AgentWithOrchestrator
+		var a AgentWithHarness
 		var enabled, isDefault int
 		if err := rows.Scan(&a.Slug, &a.DisplayName, &a.Emoji, &a.Projects, &a.Description, &a.Role, &enabled,
-			&a.Orchestrator, &a.OrchestratorName, &a.Model, &isDefault, &a.OrchEmoji); err != nil {
+			&a.Harness, &a.HarnessName, &a.Model, &isDefault, &a.HarnessEmoji); err != nil {
 			return nil, err
 		}
 		a.Enabled = enabled != 0
@@ -227,7 +273,7 @@ func (s *Store) DeleteAgent(id int64) error {
 // ORCHESTRATORS
 // ============================================
 
-type Orchestrator struct {
+type Harness struct {
 	ID             string
 	DisplayName    string
 	DefaultAgentID *int64
@@ -237,13 +283,13 @@ type Orchestrator struct {
 	UpdatedAt      int64
 }
 
-func (s *Store) UpsertOrchestrator(o *Orchestrator) error {
+func (s *Store) UpsertHarness(o *Harness) error {
 	if o.CreatedAt == 0 {
 		o.CreatedAt = now()
 	}
 	o.UpdatedAt = now()
 	_, err := s.db.Exec(`
-		INSERT INTO orchestrators (id, display_name, default_agent_id, config_path, api_endpoint, created_at, updated_at)
+		INSERT INTO harness (id, display_name, default_agent_id, config_path, api_endpoint, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			display_name=excluded.display_name, default_agent_id=excluded.default_agent_id,
@@ -253,11 +299,11 @@ func (s *Store) UpsertOrchestrator(o *Orchestrator) error {
 	return err
 }
 
-func (s *Store) GetOrchestrator(id string) (*Orchestrator, error) {
-	o := &Orchestrator{ID: id}
+func (s *Store) GetHarness(id string) (*Harness, error) {
+	o := &Harness{ID: id}
 	err := s.db.QueryRow(`
 		SELECT display_name, default_agent_id, config_path, api_endpoint, created_at, updated_at
-		FROM orchestrators WHERE id=?`, id).Scan(
+		FROM harness WHERE id=?`, id).Scan(
 		&o.DisplayName, &o.DefaultAgentID, &o.ConfigPath, &o.APIEndpoint, &o.CreatedAt, &o.UpdatedAt)
 	if err != nil {
 		return nil, err
@@ -265,15 +311,15 @@ func (s *Store) GetOrchestrator(id string) (*Orchestrator, error) {
 	return o, nil
 }
 
-func (s *Store) ListOrchestrators() ([]Orchestrator, error) {
-	rows, err := s.db.Query(`SELECT id, display_name, default_agent_id, config_path, api_endpoint, created_at, updated_at FROM orchestrators ORDER BY id`)
+func (s *Store) ListHarnesses() ([]Harness, error) {
+	rows, err := s.db.Query(`SELECT id, display_name, default_agent_id, config_path, api_endpoint, created_at, updated_at FROM harness ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Orchestrator
+	var out []Harness
 	for rows.Next() {
-		var o Orchestrator
+		var o Harness
 		if err := rows.Scan(&o.ID, &o.DisplayName, &o.DefaultAgentID, &o.ConfigPath, &o.APIEndpoint, &o.CreatedAt, &o.UpdatedAt); err != nil {
 			return nil, err
 		}
@@ -282,8 +328,8 @@ func (s *Store) ListOrchestrators() ([]Orchestrator, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) DeleteOrchestrator(id string) error {
-	_, err := s.db.Exec("DELETE FROM orchestrators WHERE id=?", id)
+func (s *Store) DeleteHarness(id string) error {
+	_, err := s.db.Exec("DELETE FROM harness WHERE id=?", id)
 	return err
 }
 
@@ -291,10 +337,10 @@ func (s *Store) DeleteOrchestrator(id string) error {
 // AGENT ORCHESTRATORS
 // ============================================
 
-type AgentOrchestrator struct {
+type AgentHarness struct {
 	AgentID             int64
-	OrchestratorID      string
-	OrchestratorAgentID string
+	HarnessID      string
+	HarnessAgentID string
 	Enabled             bool
 	ModelPrimary        string
 	ModelFallbacks      string // JSON array
@@ -314,16 +360,16 @@ type AgentOrchestrator struct {
 	UpdatedAt           int64
 }
 
-func (s *Store) UpsertAgentOrchestrator(ao *AgentOrchestrator) error {
+func (s *Store) UpsertAgentHarness(ao *AgentHarness) error {
 	if ao.CreatedAt == 0 {
 		ao.CreatedAt = now()
 	}
 	ao.UpdatedAt = now()
 	_, err := s.db.Exec(`
-		INSERT INTO agent_orchestrators (agent_id, orchestrator_id, orchestrator_agent_id, enabled, model_primary, model_fallbacks, workspace_path, thinking_budget, context_budget, context_tags, max_turns, max_input_tokens, max_response_time, system_prompt, project, shelved, is_default, subagent_allow, created_at, updated_at)
+		INSERT INTO agent_harness (agent_id, harness_id, harness_agent_id, enabled, model_primary, model_fallbacks, workspace_path, thinking_budget, context_budget, context_tags, max_turns, max_input_tokens, max_response_time, system_prompt, project, shelved, is_default, subagent_allow, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(agent_id, orchestrator_id) DO UPDATE SET
-			orchestrator_agent_id=excluded.orchestrator_agent_id, enabled=excluded.enabled,
+		ON CONFLICT(agent_id, harness_id) DO UPDATE SET
+			harness_agent_id=excluded.harness_agent_id, enabled=excluded.enabled,
 			model_primary=excluded.model_primary, model_fallbacks=excluded.model_fallbacks,
 			workspace_path=excluded.workspace_path, thinking_budget=excluded.thinking_budget,
 			context_budget=excluded.context_budget, context_tags=excluded.context_tags,
@@ -331,21 +377,21 @@ func (s *Store) UpsertAgentOrchestrator(ao *AgentOrchestrator) error {
 			max_response_time=excluded.max_response_time, system_prompt=excluded.system_prompt,
 			project=excluded.project, shelved=excluded.shelved, is_default=excluded.is_default,
 			subagent_allow=excluded.subagent_allow, updated_at=excluded.updated_at
-	`, ao.AgentID, ao.OrchestratorID, ao.OrchestratorAgentID, boolToInt(ao.Enabled), ao.ModelPrimary, ao.ModelFallbacks, ao.WorkspacePath, ao.ThinkingBudget, ao.ContextBudget, ao.ContextTags, ao.MaxTurns, ao.MaxInputTokens, ao.MaxResponseTime, ao.SystemPrompt, ao.Project, boolToInt(ao.Shelved), boolToInt(ao.IsDefault), ao.SubagentAllow, ao.CreatedAt, ao.UpdatedAt)
+	`, ao.AgentID, ao.HarnessID, ao.HarnessAgentID, boolToInt(ao.Enabled), ao.ModelPrimary, ao.ModelFallbacks, ao.WorkspacePath, ao.ThinkingBudget, ao.ContextBudget, ao.ContextTags, ao.MaxTurns, ao.MaxInputTokens, ao.MaxResponseTime, ao.SystemPrompt, ao.Project, boolToInt(ao.Shelved), boolToInt(ao.IsDefault), ao.SubagentAllow, ao.CreatedAt, ao.UpdatedAt)
 	return err
 }
 
-const aoCols = `agent_id, orchestrator_id, orchestrator_agent_id, enabled, model_primary, model_fallbacks, workspace_path, thinking_budget, context_budget, context_tags, max_turns, max_input_tokens, max_response_time, system_prompt, project, shelved, is_default, subagent_allow, created_at, updated_at`
+const aoCols = `agent_id, harness_id, harness_agent_id, enabled, model_primary, model_fallbacks, workspace_path, thinking_budget, context_budget, context_tags, max_turns, max_input_tokens, max_response_time, system_prompt, project, shelved, is_default, subagent_allow, created_at, updated_at`
 
-func scanAO(row interface{ Scan(...any) error }) (AgentOrchestrator, error) {
-	var ao AgentOrchestrator
+func scanAO(row interface{ Scan(...any) error }) (AgentHarness, error) {
+	var ao AgentHarness
 	var enabled, shelved, isDefault int
-	var modelFallbacks, contextTags, systemPrompt, workspacePath, project, orchestratorAgentID, subagentAllow *string
-	err := row.Scan(&ao.AgentID, &ao.OrchestratorID, &orchestratorAgentID, &enabled, &ao.ModelPrimary, &modelFallbacks, &workspacePath, &ao.ThinkingBudget, &ao.ContextBudget, &contextTags, &ao.MaxTurns, &ao.MaxInputTokens, &ao.MaxResponseTime, &systemPrompt, &project, &shelved, &isDefault, &subagentAllow, &ao.CreatedAt, &ao.UpdatedAt)
+	var modelFallbacks, contextTags, systemPrompt, workspacePath, project, harnessAgentID, subagentAllow *string
+	err := row.Scan(&ao.AgentID, &ao.HarnessID, &harnessAgentID, &enabled, &ao.ModelPrimary, &modelFallbacks, &workspacePath, &ao.ThinkingBudget, &ao.ContextBudget, &contextTags, &ao.MaxTurns, &ao.MaxInputTokens, &ao.MaxResponseTime, &systemPrompt, &project, &shelved, &isDefault, &subagentAllow, &ao.CreatedAt, &ao.UpdatedAt)
 	ao.Enabled = enabled == 1
 	ao.Shelved = shelved == 1
 	ao.IsDefault = isDefault == 1
-	if orchestratorAgentID != nil { ao.OrchestratorAgentID = *orchestratorAgentID }
+	if harnessAgentID != nil { ao.HarnessAgentID = *harnessAgentID }
 	if modelFallbacks != nil { ao.ModelFallbacks = *modelFallbacks }
 	if workspacePath != nil { ao.WorkspacePath = *workspacePath }
 	if contextTags != nil { ao.ContextTags = *contextTags }
@@ -355,13 +401,13 @@ func scanAO(row interface{ Scan(...any) error }) (AgentOrchestrator, error) {
 	return ao, err
 }
 
-func (s *Store) GetAgentOrchestrators(agentID int64) ([]AgentOrchestrator, error) {
-	rows, err := s.db.Query(`SELECT `+aoCols+` FROM agent_orchestrators WHERE agent_id=? ORDER BY orchestrator_id`, agentID)
+func (s *Store) GetAgentHarnesses(agentID int64) ([]AgentHarness, error) {
+	rows, err := s.db.Query(`SELECT `+aoCols+` FROM agent_harness WHERE agent_id=? ORDER BY harness_id`, agentID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []AgentOrchestrator
+	var out []AgentHarness
 	for rows.Next() {
 		ao, err := scanAO(rows)
 		if err != nil {
@@ -372,13 +418,13 @@ func (s *Store) GetAgentOrchestrators(agentID int64) ([]AgentOrchestrator, error
 	return out, rows.Err()
 }
 
-func (s *Store) GetOrchestratorAgents(orchestratorID string) ([]AgentOrchestrator, error) {
-	rows, err := s.db.Query(`SELECT `+aoCols+` FROM agent_orchestrators WHERE orchestrator_id=? ORDER BY agent_id`, orchestratorID)
+func (s *Store) GetHarnessAgents(harnessID string) ([]AgentHarness, error) {
+	rows, err := s.db.Query(`SELECT `+aoCols+` FROM agent_harness WHERE harness_id=? ORDER BY agent_id`, harnessID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []AgentOrchestrator
+	var out []AgentHarness
 	for rows.Next() {
 		ao, err := scanAO(rows)
 		if err != nil {
@@ -389,19 +435,19 @@ func (s *Store) GetOrchestratorAgents(orchestratorID string) ([]AgentOrchestrato
 	return out, rows.Err()
 }
 
-// GetAgentByOrchestratorID finds an agent by its orchestrator-specific ID.
-func (s *Store) GetAgentByOrchestratorID(orchestratorID, orchAgentID string) (*Agent, error) {
+// GetAgentByHarnessID finds an agent by its harness-specific ID.
+func (s *Store) GetAgentByHarnessID(harnessID, harnessAgentID string) (*Agent, error) {
 	var agentID int64
-	err := s.db.QueryRow(`SELECT agent_id FROM agent_orchestrators WHERE orchestrator_id=? AND orchestrator_agent_id=?`,
-		orchestratorID, orchAgentID).Scan(&agentID)
+	err := s.db.QueryRow(`SELECT agent_id FROM agent_harness WHERE harness_id=? AND harness_agent_id=?`,
+		harnessID, harnessAgentID).Scan(&agentID)
 	if err != nil {
 		return nil, err
 	}
 	return s.GetAgent(agentID)
 }
 
-func (s *Store) DeleteAgentOrchestrator(agentID int64, orchestratorID string) error {
-	_, err := s.db.Exec("DELETE FROM agent_orchestrators WHERE agent_id=? AND orchestrator_id=?", agentID, orchestratorID)
+func (s *Store) DeleteAgentHarness(agentID int64, harnessID string) error {
+	_, err := s.db.Exec("DELETE FROM agent_harness WHERE agent_id=? AND harness_id=?", agentID, harnessID)
 	return err
 }
 
@@ -409,25 +455,25 @@ func (s *Store) DeleteAgentOrchestrator(agentID int64, orchestratorID string) er
 // AGENT TOOLS
 // ============================================
 
-func (s *Store) SetAgentTools(agentID int64, orchestratorID string, tools []string) error {
+func (s *Store) SetAgentTools(agentID int64, harnessID string, tools []string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec("DELETE FROM agent_tools WHERE agent_id=? AND orchestrator_id=?", agentID, orchestratorID); err != nil {
+	if _, err := tx.Exec("DELETE FROM agent_harness_tools WHERE agent_id=? AND harness_id=?", agentID, harnessID); err != nil {
 		return err
 	}
 	for _, t := range tools {
-		if _, err := tx.Exec("INSERT INTO agent_tools (agent_id, orchestrator_id, tool_name) VALUES (?, ?, ?)", agentID, orchestratorID, t); err != nil {
+		if _, err := tx.Exec("INSERT INTO agent_harness_tools (agent_id, harness_id, tool_name) VALUES (?, ?, ?)", agentID, harnessID, t); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
 
-func (s *Store) ListAgentTools(agentID int64, orchestratorID string) ([]string, error) {
-	rows, err := s.db.Query("SELECT tool_name FROM agent_tools WHERE agent_id=? AND orchestrator_id=? ORDER BY tool_name", agentID, orchestratorID)
+func (s *Store) ListAgentTools(agentID int64, harnessID string) ([]string, error) {
+	rows, err := s.db.Query("SELECT tool_name FROM agent_harness_tools WHERE agent_id=? AND harness_id=? ORDER BY tool_name", agentID, harnessID)
 	if err != nil {
 		return nil, err
 	}
@@ -444,10 +490,10 @@ func (s *Store) ListAgentTools(agentID int64, orchestratorID string) ([]string, 
 }
 
 // ============================================
-// FULL AGENT CONFIG (for orchestrators)
+// FULL AGENT CONFIG (for harnesses)
 // ============================================
 
-// FullAgentConfig is everything an orchestrator needs for one agent.
+// FullAgentConfig is everything an harness needs for one agent.
 type FullAgentConfig struct {
 	Slug        string   `json:"slug"`
 	DisplayName string   `json:"name"`
@@ -473,20 +519,20 @@ type FullAgentConfig struct {
 	UserContext string `json:"user_context,omitempty"`
 }
 
-func (s *Store) GetFullAgentConfig(slug string, orchestratorID string) (*FullAgentConfig, error) {
+func (s *Store) GetFullAgentConfig(slug string, harnessID string) (*FullAgentConfig, error) {
 	a, err := s.GetAgentBySlug(slug)
 	if err != nil {
 		return nil, fmt.Errorf("agent not found: %s", slug)
 	}
 
-	// Get orchestrator config
-	row := s.db.QueryRow(`SELECT `+aoCols+` FROM agent_orchestrators WHERE agent_id=? AND orchestrator_id=?`, a.ID, orchestratorID)
+	// Get harness config
+	row := s.db.QueryRow(`SELECT `+aoCols+` FROM agent_harness WHERE agent_id=? AND harness_id=?`, a.ID, harnessID)
 	ao, err := scanAO(row)
 	if err != nil {
-		return nil, fmt.Errorf("agent %s not registered with orchestrator %s", slug, orchestratorID)
+		return nil, fmt.Errorf("agent %s not registered with harness %s", slug, harnessID)
 	}
 
-	tools, _ := s.ListAgentTools(a.ID, orchestratorID)
+	tools, _ := s.ListAgentTools(a.ID, harnessID)
 	if tools == nil {
 		tools = []string{}
 	}
@@ -534,18 +580,18 @@ func (s *Store) GetFullAgentConfig(slug string, orchestratorID string) (*FullAge
 	return cfg, nil
 }
 
-// GetAllAgentConfigs returns full configs for all agents registered with an orchestrator.
-func (s *Store) GetAllAgentConfigs(orchestratorID string) ([]FullAgentConfig, string, error) {
+// GetAllAgentConfigs returns full configs for all agents registered with an harness.
+func (s *Store) GetAllAgentConfigs(harnessID string) ([]FullAgentConfig, string, error) {
 	// Get default agent slug
 	var defaultSlug string
-	orch, err := s.GetOrchestrator(orchestratorID)
-	if err == nil && orch.DefaultAgentID != nil {
-		if da, err := s.GetAgent(*orch.DefaultAgentID); err == nil {
+	h, err := s.GetHarness(harnessID)
+	if err == nil && h.DefaultAgentID != nil {
+		if da, err := s.GetAgent(*h.DefaultAgentID); err == nil {
 			defaultSlug = da.Slug
 		}
 	}
 
-	aos, err := s.GetOrchestratorAgents(orchestratorID)
+	aos, err := s.GetHarnessAgents(harnessID)
 	if err != nil {
 		return nil, "", err
 	}
@@ -556,7 +602,7 @@ func (s *Store) GetAllAgentConfigs(orchestratorID string) ([]FullAgentConfig, st
 		if err != nil {
 			continue
 		}
-		cfg, err := s.GetFullAgentConfig(a.Slug, orchestratorID)
+		cfg, err := s.GetFullAgentConfig(a.Slug, harnessID)
 		if err != nil {
 			continue
 		}
@@ -570,7 +616,7 @@ func (s *Store) GetAllAgentConfigs(orchestratorID string) ([]FullAgentConfig, st
 // ============================================
 
 type AgentSystemPromptRef struct {
-	OrchestratorID    string
+	HarnessID    string
 	HostAgentID       int64
 	ReferencedAgentID int64
 	PromptLocation    string
@@ -582,15 +628,15 @@ func (s *Store) UpsertSystemPromptRef(r *AgentSystemPromptRef) error {
 		r.CreatedAt = now()
 	}
 	_, err := s.db.Exec(`
-		INSERT OR IGNORE INTO agent_system_prompt_refs (orchestrator_id, host_agent_id, referenced_agent_id, prompt_location, created_at)
+		INSERT OR IGNORE INTO agent_system_prompt_refs (harness_id, host_agent_id, referenced_agent_id, prompt_location, created_at)
 		VALUES (?, ?, ?, ?, ?)
-	`, r.OrchestratorID, r.HostAgentID, r.ReferencedAgentID, r.PromptLocation, r.CreatedAt)
+	`, r.HarnessID, r.HostAgentID, r.ReferencedAgentID, r.PromptLocation, r.CreatedAt)
 	return err
 }
 
 func (s *Store) ListSystemPromptRefs(hostAgentID int64) ([]AgentSystemPromptRef, error) {
 	rows, err := s.db.Query(`
-		SELECT orchestrator_id, host_agent_id, referenced_agent_id, prompt_location, created_at
+		SELECT harness_id, host_agent_id, referenced_agent_id, prompt_location, created_at
 		FROM agent_system_prompt_refs WHERE host_agent_id=?`, hostAgentID)
 	if err != nil {
 		return nil, err
@@ -599,7 +645,7 @@ func (s *Store) ListSystemPromptRefs(hostAgentID int64) ([]AgentSystemPromptRef,
 	var out []AgentSystemPromptRef
 	for rows.Next() {
 		var r AgentSystemPromptRef
-		if err := rows.Scan(&r.OrchestratorID, &r.HostAgentID, &r.ReferencedAgentID, &r.PromptLocation, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.HarnessID, &r.HostAgentID, &r.ReferencedAgentID, &r.PromptLocation, &r.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -607,9 +653,9 @@ func (s *Store) ListSystemPromptRefs(hostAgentID int64) ([]AgentSystemPromptRef,
 	return out, rows.Err()
 }
 
-func (s *Store) DeleteSystemPromptRef(orchID string, hostID, refID int64, location string) error {
-	_, err := s.db.Exec(`DELETE FROM agent_system_prompt_refs WHERE orchestrator_id=? AND host_agent_id=? AND referenced_agent_id=? AND prompt_location=?`,
-		orchID, hostID, refID, location)
+func (s *Store) DeleteSystemPromptRef(harnessID string, hostID, refID int64, location string) error {
+	_, err := s.db.Exec(`DELETE FROM agent_system_prompt_refs WHERE harness_id=? AND host_agent_id=? AND referenced_agent_id=? AND prompt_location=?`,
+		harnessID, hostID, refID, location)
 	return err
 }
 
@@ -758,23 +804,23 @@ func (s *Store) ResolveAgentName(name string) (*Agent, error) {
 type FileDistribution struct {
 	ID              int64
 	AgentID         int64
-	OrchestratorID  string
+	HarnessID  string
 	FilePath        string
 	ContentHash     string
 	DistributedAt   int64
 	SourceNatureIDs string // JSON array
 }
 
-func (s *Store) RecordDistribution(agentID int64, orchID string, filePath string, contentHash string, sourceNatureIDs []int64) (int64, error) {
+func (s *Store) RecordDistribution(agentID int64, harnessID string, filePath string, contentHash string, sourceNatureIDs []int64) (int64, error) {
 	var idsJSON string
 	if len(sourceNatureIDs) > 0 {
 		b, _ := json.Marshal(sourceNatureIDs)
 		idsJSON = string(b)
 	}
 	res, err := s.db.Exec(`
-		INSERT INTO file_distributions (agent_id, orchestrator_id, file_path, content_hash, distributed_at, source_nature_ids)
+		INSERT INTO file_distributions (agent_id, harness_id, file_path, content_hash, distributed_at, source_nature_ids)
 		VALUES (?, ?, ?, ?, ?, ?)
-	`, agentID, orchID, filePath, contentHash, now(), idsJSON)
+	`, agentID, harnessID, filePath, contentHash, now(), idsJSON)
 	if err != nil {
 		return 0, err
 	}
@@ -784,9 +830,9 @@ func (s *Store) RecordDistribution(agentID int64, orchID string, filePath string
 func (s *Store) GetLatestDistribution(filePath string) (*FileDistribution, error) {
 	d := &FileDistribution{}
 	err := s.db.QueryRow(`
-		SELECT id, agent_id, orchestrator_id, file_path, content_hash, distributed_at, COALESCE(source_nature_ids,'')
+		SELECT id, agent_id, harness_id, file_path, content_hash, distributed_at, COALESCE(source_nature_ids,'')
 		FROM file_distributions WHERE file_path=? ORDER BY distributed_at DESC LIMIT 1`, filePath).Scan(
-		&d.ID, &d.AgentID, &d.OrchestratorID, &d.FilePath, &d.ContentHash, &d.DistributedAt, &d.SourceNatureIDs)
+		&d.ID, &d.AgentID, &d.HarnessID, &d.FilePath, &d.ContentHash, &d.DistributedAt, &d.SourceNatureIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -795,7 +841,7 @@ func (s *Store) GetLatestDistribution(filePath string) (*FileDistribution, error
 
 func (s *Store) ListDistributions(agentID int64) ([]FileDistribution, error) {
 	rows, err := s.db.Query(`
-		SELECT id, agent_id, orchestrator_id, file_path, content_hash, distributed_at, COALESCE(source_nature_ids,'')
+		SELECT id, agent_id, harness_id, file_path, content_hash, distributed_at, COALESCE(source_nature_ids,'')
 		FROM file_distributions WHERE agent_id=? ORDER BY distributed_at DESC`, agentID)
 	if err != nil {
 		return nil, err
@@ -804,7 +850,7 @@ func (s *Store) ListDistributions(agentID int64) ([]FileDistribution, error) {
 	var out []FileDistribution
 	for rows.Next() {
 		var d FileDistribution
-		if err := rows.Scan(&d.ID, &d.AgentID, &d.OrchestratorID, &d.FilePath, &d.ContentHash, &d.DistributedAt, &d.SourceNatureIDs); err != nil {
+		if err := rows.Scan(&d.ID, &d.AgentID, &d.HarnessID, &d.FilePath, &d.ContentHash, &d.DistributedAt, &d.SourceNatureIDs); err != nil {
 			return nil, err
 		}
 		out = append(out, d)
@@ -850,7 +896,7 @@ func (s *Store) MarkIngested(scanID int64) error {
 func (s *Store) GetPendingScans() ([]FileDistribution, error) {
 	// Distributions that have never been scanned, or whose latest scan is older than their distribution
 	rows, err := s.db.Query(`
-		SELECT d.id, d.agent_id, d.orchestrator_id, d.file_path, d.content_hash, d.distributed_at, COALESCE(d.source_nature_ids,'')
+		SELECT d.id, d.agent_id, d.harness_id, d.file_path, d.content_hash, d.distributed_at, COALESCE(d.source_nature_ids,'')
 		FROM file_distributions d
 		LEFT JOIN file_scans fs ON fs.file_distribution_id = d.id
 		GROUP BY d.id
@@ -863,7 +909,7 @@ func (s *Store) GetPendingScans() ([]FileDistribution, error) {
 	var out []FileDistribution
 	for rows.Next() {
 		var d FileDistribution
-		if err := rows.Scan(&d.ID, &d.AgentID, &d.OrchestratorID, &d.FilePath, &d.ContentHash, &d.DistributedAt, &d.SourceNatureIDs); err != nil {
+		if err := rows.Scan(&d.ID, &d.AgentID, &d.HarnessID, &d.FilePath, &d.ContentHash, &d.DistributedAt, &d.SourceNatureIDs); err != nil {
 			return nil, err
 		}
 		out = append(out, d)
@@ -1025,12 +1071,12 @@ func (s *Store) DeleteProjectNature(projectID, natureID int64) error {
 // AGENT STATUS
 // ============================================
 
-// AgentStatus represents the runtime status of an agent on an orchestrator.
+// AgentStatus represents the runtime status of an agent on an harness.
 type AgentStatus struct {
 	AgentSlug    string  `json:"agent_slug"`
 	DisplayName  string  `json:"display_name"`
 	Emoji        string  `json:"emoji"`
-	Orchestrator string  `json:"orchestrator"`
+	Harness string  `json:"harness"`
 	Status       string  `json:"status"`
 	Task         *string `json:"task,omitempty"`
 	SessionID    *string `json:"session_id,omitempty"`
@@ -1039,7 +1085,7 @@ type AgentStatus struct {
 }
 
 // SetStatus upserts an agent status row. Sets started_at when transitioning to "working".
-func (s *Store) SetStatus(agentSlug, orchestratorID, status, task, sessionID string) error {
+func (s *Store) SetStatus(agentSlug, harnessID, status, task, sessionID string) error {
 	agent, err := s.ResolveAgentName(agentSlug)
 	if err != nil {
 		return err
@@ -1053,37 +1099,37 @@ func (s *Store) SetStatus(agentSlug, orchestratorID, status, task, sessionID str
 		sessionPtr = &sessionID
 	}
 	_, err = s.db.Exec(`
-		INSERT INTO agent_status (agent_id, orchestrator_id, status, task, session_id, started_at, updated_at)
+		INSERT INTO agent_status (agent_id, harness_id, status, task, session_id, started_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(agent_id, orchestrator_id) DO UPDATE SET
+		ON CONFLICT(agent_id, harness_id) DO UPDATE SET
 			status=excluded.status, task=excluded.task, session_id=excluded.session_id,
 			started_at=CASE WHEN agent_status.status != 'working' AND excluded.status = 'working' THEN excluded.updated_at ELSE agent_status.started_at END,
 			updated_at=excluded.updated_at
-	`, agent.ID, orchestratorID, status, taskPtr, sessionPtr, n, n)
+	`, agent.ID, harnessID, status, taskPtr, sessionPtr, n, n)
 	return err
 }
 
 // ClearStatus sets an agent's status to idle and clears task/session.
-func (s *Store) ClearStatus(agentSlug, orchestratorID string) error {
+func (s *Store) ClearStatus(agentSlug, harnessID string) error {
 	agent, err := s.ResolveAgentName(agentSlug)
 	if err != nil {
 		return err
 	}
 	_, err = s.db.Exec(`
 		UPDATE agent_status SET status='idle', task=NULL, session_id=NULL, updated_at=?
-		WHERE agent_id=? AND orchestrator_id=?
-	`, now(), agent.ID, orchestratorID)
+		WHERE agent_id=? AND harness_id=?
+	`, now(), agent.ID, harnessID)
 	return err
 }
 
-// GetStatus returns the status of an agent across all orchestrators.
+// GetStatus returns the status of an agent across all harnesses.
 func (s *Store) GetStatus(agentSlug string) ([]AgentStatus, error) {
 	agent, err := s.GetAgentBySlug(agentSlug)
 	if err != nil {
 		return nil, err
 	}
 	rows, err := s.db.Query(`
-		SELECT a.slug, a.display_name, COALESCE(a.emoji,''), s.orchestrator_id, s.status, s.task, s.session_id, s.started_at, s.updated_at
+		SELECT a.slug, a.display_name, COALESCE(a.emoji,''), s.harness_id, s.status, s.task, s.session_id, s.started_at, s.updated_at
 		FROM agent_status s JOIN agents a ON a.id = s.agent_id
 		WHERE s.agent_id=?`, agent.ID)
 	if err != nil {
@@ -1093,7 +1139,7 @@ func (s *Store) GetStatus(agentSlug string) ([]AgentStatus, error) {
 	var out []AgentStatus
 	for rows.Next() {
 		var st AgentStatus
-		if err := rows.Scan(&st.AgentSlug, &st.DisplayName, &st.Emoji, &st.Orchestrator, &st.Status, &st.Task, &st.SessionID, &st.StartedAt, &st.UpdatedAt); err != nil {
+		if err := rows.Scan(&st.AgentSlug, &st.DisplayName, &st.Emoji, &st.Harness, &st.Status, &st.Task, &st.SessionID, &st.StartedAt, &st.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, st)
@@ -1104,9 +1150,9 @@ func (s *Store) GetStatus(agentSlug string) ([]AgentStatus, error) {
 // ListStatuses returns all agent statuses.
 func (s *Store) ListStatuses() ([]AgentStatus, error) {
 	rows, err := s.db.Query(`
-		SELECT a.slug, a.display_name, COALESCE(a.emoji,''), s.orchestrator_id, s.status, s.task, s.session_id, s.started_at, s.updated_at
+		SELECT a.slug, a.display_name, COALESCE(a.emoji,''), s.harness_id, s.status, s.task, s.session_id, s.started_at, s.updated_at
 		FROM agent_status s JOIN agents a ON a.id = s.agent_id
-		ORDER BY a.slug, s.orchestrator_id`)
+		ORDER BY a.slug, s.harness_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -1114,7 +1160,7 @@ func (s *Store) ListStatuses() ([]AgentStatus, error) {
 	var out []AgentStatus
 	for rows.Next() {
 		var st AgentStatus
-		if err := rows.Scan(&st.AgentSlug, &st.DisplayName, &st.Emoji, &st.Orchestrator, &st.Status, &st.Task, &st.SessionID, &st.StartedAt, &st.UpdatedAt); err != nil {
+		if err := rows.Scan(&st.AgentSlug, &st.DisplayName, &st.Emoji, &st.Harness, &st.Status, &st.Task, &st.SessionID, &st.StartedAt, &st.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, st)
@@ -1122,16 +1168,16 @@ func (s *Store) ListStatuses() ([]AgentStatus, error) {
 	return out, rows.Err()
 }
 
-// ResolveOrchestratorAgent finds the canonical agent slug given an orchestrator-specific agent name.
-func (s *Store) ResolveOrchestratorAgent(orchestratorID, orchAgentName string) (string, error) {
+// ResolveHarnessAgent finds the canonical agent slug given an harness-specific agent name.
+func (s *Store) ResolveHarnessAgent(harnessID, harnessAgentName string) (string, error) {
 	var slug string
 	err := s.db.QueryRow(`
 		SELECT a.slug FROM agents a
-		JOIN agent_orchestrators ao ON a.id = ao.agent_id
-		WHERE ao.orchestrator_id=? AND ao.orchestrator_agent_id=?
-	`, orchestratorID, orchAgentName).Scan(&slug)
+		JOIN agent_harness ao ON a.id = ao.agent_id
+		WHERE ao.harness_id=? AND ao.harness_agent_id=?
+	`, harnessID, harnessAgentName).Scan(&slug)
 	if err != nil {
-		return "", fmt.Errorf("no agent found for orchestrator=%s agent=%s", orchestratorID, orchAgentName)
+		return "", fmt.Errorf("no agent found for harness=%s agent=%s", harnessID, harnessAgentName)
 	}
 	return slug, nil
 }

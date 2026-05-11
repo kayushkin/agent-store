@@ -1,5 +1,5 @@
 -- agent-store schema
--- Single source of truth for agent identity, nature, and orchestrator configs
+-- Single source of truth for agent identity, nature, and harness configs
 
 PRAGMA foreign_keys = ON;
 
@@ -16,16 +16,22 @@ CREATE TABLE IF NOT EXISTS agents (
     description TEXT,
     role TEXT,
     enabled INTEGER DEFAULT 1,
+    parent_agent_id INTEGER,              -- nullable; non-null means this is a subagent under another agent
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (parent_agent_id) REFERENCES agents(id) ON DELETE SET NULL
 );
 
--- ============================================
--- ORCHESTRATORS
--- ============================================
+CREATE INDEX IF NOT EXISTS idx_agents_parent ON agents(parent_agent_id);
 
-CREATE TABLE IF NOT EXISTS orchestrators (
-    id TEXT PRIMARY KEY,                  -- "inber", "openclaw", "dash"
+-- ============================================
+-- HARNESS (registry of agent runtimes — CC, Codex, inber, etc.)
+-- ============================================
+-- Pre-2026-05-11 name: "orchestrators". Renamed to align with the harness-layer
+-- design in ~/repos/llm-bridge-server/HARNESS-LAYER.md.
+
+CREATE TABLE IF NOT EXISTS harness (
+    id TEXT PRIMARY KEY,                  -- "claudecode", "codex", "inber", "openclaw", "dash"
     display_name TEXT NOT NULL,
     default_agent_id INTEGER,             -- FK to agents.id
     config_path TEXT,                     -- e.g. "~/.openclaw/openclaw.json"
@@ -36,13 +42,14 @@ CREATE TABLE IF NOT EXISTS orchestrators (
 );
 
 -- ============================================
--- AGENT ↔ ORCHESTRATOR (reconciliation join)
+-- AGENT ↔ HARNESS (per-harness agent config)
 -- ============================================
+-- Pre-2026-05-11 name: "agent_orchestrators".
 
-CREATE TABLE IF NOT EXISTS agent_orchestrators (
+CREATE TABLE IF NOT EXISTS agent_harness (
     agent_id INTEGER NOT NULL,
-    orchestrator_id TEXT NOT NULL,
-    orchestrator_agent_id TEXT NOT NULL,   -- what the orchestrator calls this agent
+    harness_id TEXT NOT NULL,
+    harness_agent_id TEXT NOT NULL,        -- what the harness calls this agent
     enabled INTEGER DEFAULT 1,
     model_primary TEXT,
     model_fallbacks TEXT,                  -- JSON array
@@ -57,27 +64,42 @@ CREATE TABLE IF NOT EXISTS agent_orchestrators (
     project TEXT,                          -- forge project name
     shelved INTEGER DEFAULT 0,
     is_default INTEGER DEFAULT 0,
-    subagent_allow TEXT,                  -- JSON array, e.g. '["*"]'
+    subagent_allow TEXT,                   -- JSON array, e.g. '["*"]'
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
-    PRIMARY KEY (agent_id, orchestrator_id),
+    PRIMARY KEY (agent_id, harness_id),
     FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
-    FOREIGN KEY (orchestrator_id) REFERENCES orchestrators(id) ON DELETE CASCADE
+    FOREIGN KEY (harness_id) REFERENCES harness(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_agent_orch_orch ON agent_orchestrators(orchestrator_id);
+CREATE INDEX IF NOT EXISTS idx_agent_harness_harness ON agent_harness(harness_id);
 
 -- ============================================
--- AGENT TOOLS (per orchestrator)
+-- AGENT HARNESS TOOLS (tool enrollment per agent+harness)
 -- ============================================
+-- Pre-2026-05-11 name: "agent_tools".
 
-CREATE TABLE IF NOT EXISTS agent_tools (
+CREATE TABLE IF NOT EXISTS agent_harness_tools (
     agent_id INTEGER NOT NULL,
-    orchestrator_id TEXT NOT NULL,
+    harness_id TEXT NOT NULL,
     tool_name TEXT NOT NULL,
-    PRIMARY KEY (agent_id, orchestrator_id, tool_name),
+    PRIMARY KEY (agent_id, harness_id, tool_name),
     FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
-    FOREIGN KEY (orchestrator_id) REFERENCES orchestrators(id) ON DELETE CASCADE
+    FOREIGN KEY (harness_id) REFERENCES harness(id) ON DELETE CASCADE
+);
+
+-- ============================================
+-- AGENT SKILLS (skill enrollment per agent)
+-- ============================================
+-- Parallel to agent_harness_tools. Skill enrollment is harness-agnostic at the
+-- canonical level; per-harness rendering is in the render library (see
+-- ~/repos/llm-bridge-server/TOOL-ROUTING.md skills section).
+
+CREATE TABLE IF NOT EXISTS agent_skills (
+    agent_id INTEGER NOT NULL,
+    skill_id TEXT NOT NULL,                -- references skill-store entry by id
+    PRIMARY KEY (agent_id, skill_id),
+    FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
 );
 
 -- ============================================
@@ -85,13 +107,13 @@ CREATE TABLE IF NOT EXISTS agent_tools (
 -- ============================================
 
 CREATE TABLE IF NOT EXISTS agent_system_prompt_refs (
-    orchestrator_id TEXT NOT NULL,
+    harness_id TEXT NOT NULL,
     host_agent_id INTEGER NOT NULL,       -- agent whose prompt contains the listing
     referenced_agent_id INTEGER NOT NULL, -- agent being listed
     prompt_location TEXT NOT NULL,         -- "AGENTS.md", "openclaw.json"
     created_at INTEGER NOT NULL,
-    PRIMARY KEY (orchestrator_id, host_agent_id, referenced_agent_id, prompt_location),
-    FOREIGN KEY (orchestrator_id) REFERENCES orchestrators(id) ON DELETE CASCADE,
+    PRIMARY KEY (harness_id, host_agent_id, referenced_agent_id, prompt_location),
+    FOREIGN KEY (harness_id) REFERENCES harness(id) ON DELETE CASCADE,
     FOREIGN KEY (host_agent_id) REFERENCES agents(id) ON DELETE CASCADE,
     FOREIGN KEY (referenced_agent_id) REFERENCES agents(id) ON DELETE CASCADE
 );
@@ -132,23 +154,23 @@ CREATE TABLE IF NOT EXISTS agent_name_aliases (
 CREATE INDEX IF NOT EXISTS idx_aliases_alias ON agent_name_aliases(alias);
 
 -- ============================================
--- FILE DISTRIBUTIONS (agent-store → orchestrator files)
+-- FILE DISTRIBUTIONS (agent-store → harness files)
 -- ============================================
 
 CREATE TABLE IF NOT EXISTS file_distributions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_id INTEGER NOT NULL,
-    orchestrator_id TEXT NOT NULL,
+    harness_id TEXT NOT NULL,
     file_path TEXT NOT NULL,               -- absolute path where file was written
     content_hash TEXT NOT NULL,            -- SHA256 of file content at distribution time
     distributed_at INTEGER NOT NULL,
     source_nature_ids TEXT,                -- JSON array of agent_nature IDs that contributed
     FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
-    FOREIGN KEY (orchestrator_id) REFERENCES orchestrators(id) ON DELETE CASCADE
+    FOREIGN KEY (harness_id) REFERENCES harness(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_file_dist_agent ON file_distributions(agent_id);
-CREATE INDEX IF NOT EXISTS idx_file_dist_orch ON file_distributions(orchestrator_id);
+CREATE INDEX IF NOT EXISTS idx_file_dist_harness ON file_distributions(harness_id);
 CREATE INDEX IF NOT EXISTS idx_file_dist_path ON file_distributions(file_path);
 
 -- ============================================
@@ -198,15 +220,15 @@ CREATE TABLE IF NOT EXISTS project_nature (
 
 CREATE TABLE IF NOT EXISTS agent_status (
     agent_id INTEGER NOT NULL,
-    orchestrator_id TEXT NOT NULL,
+    harness_id TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'idle',
     task TEXT,
     session_id TEXT,
     started_at INTEGER,
     updated_at INTEGER NOT NULL,
-    PRIMARY KEY (agent_id, orchestrator_id),
+    PRIMARY KEY (agent_id, harness_id),
     FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
-    FOREIGN KEY (orchestrator_id) REFERENCES orchestrators(id) ON DELETE CASCADE
+    FOREIGN KEY (harness_id) REFERENCES harness(id) ON DELETE CASCADE
 );
 
 -- ============================================
@@ -215,11 +237,12 @@ CREATE TABLE IF NOT EXISTS agent_status (
 -- path = canonical path (without .disabled suffix).
 -- enabled=0 means the file lives at path+".disabled" on disk.
 -- DB stores no content; GET /files/{id}/content reads from disk live.
+-- scope values: global, project, subagent, memory, command, inber, mcp-config, settings
 
 CREATE TABLE IF NOT EXISTS tracked_files (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     path TEXT UNIQUE NOT NULL,
-    scope TEXT NOT NULL,                    -- global, project, subagent, memory, inber
+    scope TEXT NOT NULL,                    -- global, project, subagent, memory, inber, mcp-config, settings
     agent_slug TEXT,                        -- nullable; matched from filename stem
     enabled INTEGER NOT NULL DEFAULT 1,
     fs_hash TEXT,
@@ -243,13 +266,14 @@ CREATE INDEX IF NOT EXISTS idx_tracked_files_status ON tracked_files(status);
 -- pruning is a separate decision.
 --
 -- source values:
---   "ui-save"      — user saved via PUT /files/{id}/content
---   "scan-import"  — bridge auto-scan picked up a hash change made out-of-band
---   "runner-drift" — a runner reported a hash on its disk that the bridge did not know
---   "seed"         — a runner accepted a seeded version (recorded for audit)
+--   "ui-save"        — user saved via PUT /files/{id}/content
+--   "scan-import"    — bridge auto-scan picked up a hash change made out-of-band
+--   "runner-drift"   — a runner reported a hash on its disk that the bridge did not know
+--   "seed"           — a runner accepted a seeded version (recorded for audit)
+--   "harness-render" — a harness bridge EnsureAgent produced this content
 --
 -- machine_id is the harness-store machine ID for runner-drift / seed rows;
--- NULL for ui-save and bridge-host scan-import.
+-- NULL for ui-save, bridge-host scan-import, and harness-render.
 
 CREATE TABLE IF NOT EXISTS tracked_file_versions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

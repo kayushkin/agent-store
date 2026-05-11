@@ -146,17 +146,17 @@ func main() {
 	}
 	defer store.Close()
 
-	// Seed orchestrators
-	orchs := []agentstore.Orchestrator{
+	// Seed harnesses
+	orchs := []agentstore.Harness{
 		{ID: "inber", DisplayName: "Inber", ConfigPath: "~/repos/inber/agents/"},
 		{ID: "openclaw", DisplayName: "OpenClaw", ConfigPath: "~/.openclaw/openclaw.json"},
 		{ID: "dash", DisplayName: "Dash", APIEndpoint: "localhost:8101/api/agents"},
 	}
 	for i := range orchs {
-		if err := store.UpsertOrchestrator(&orchs[i]); err != nil {
-			log.Fatalf("upsert orchestrator %s: %v", orchs[i].ID, err)
+		if err := store.UpsertHarness(&orchs[i]); err != nil {
+			log.Fatalf("upsert harness %s: %v", orchs[i].ID, err)
 		}
-		fmt.Printf("  orchestrator: %s\n", orchs[i].ID)
+		fmt.Printf("  harness: %s\n", orchs[i].ID)
 	}
 
 	agentIDs := map[string]int64{}
@@ -196,13 +196,13 @@ func main() {
 		agentIDs[ma.ID] = agent.ID
 		fmt.Printf("  agent: %s %s (id=%d)\n", ma.Emoji, ma.ID, agent.ID)
 
-		// Inber orchestrator config
+		// Inber harness config
 		if hasInber {
 			tagsJSON, _ := json.Marshal(ia.Context.Tags)
-			ao := agentstore.AgentOrchestrator{
+			ao := agentstore.AgentHarness{
 				AgentID:             agent.ID,
-				OrchestratorID:      "inber",
-				OrchestratorAgentID: inberSlug,
+				HarnessID:      "inber",
+				HarnessAgentID: inberSlug,
 				Enabled:             true,
 				ModelPrimary:        ia.Model,
 				WorkspacePath:       ia.Workspace,
@@ -216,7 +216,7 @@ func main() {
 				Project:             ia.Project,
 				Shelved:             ia.Shelved,
 			}
-			if err := store.UpsertAgentOrchestrator(&ao); err != nil {
+			if err := store.UpsertAgentHarness(&ao); err != nil {
 				log.Fatalf("upsert ao inber/%s: %v", ma.ID, err)
 			}
 
@@ -263,13 +263,13 @@ func main() {
 		}
 		for i, ocID := range ocIDs {
 			if i == 0 {
-				ao := agentstore.AgentOrchestrator{
+				ao := agentstore.AgentHarness{
 					AgentID:             agent.ID,
-					OrchestratorID:      "openclaw",
-					OrchestratorAgentID: ocID,
+					HarnessID:      "openclaw",
+					HarnessAgentID: ocID,
 					Enabled:             true,
 				}
-				if err := store.UpsertAgentOrchestrator(&ao); err != nil {
+				if err := store.UpsertAgentHarness(&ao); err != nil {
 					log.Fatalf("upsert ao openclaw/%s: %v", ma.ID, err)
 				}
 			}
@@ -296,7 +296,7 @@ func main() {
 		defaultFallbacks := ocCfg.Agents.Defaults.Model.Fallbacks
 
 		for _, oca := range ocCfg.Agents.List {
-			// Find agent by openclaw ID alias or orchestrator mapping
+			// Find agent by openclaw ID alias or harness mapping
 			agentID, found := int64(0), false
 			for _, ma := range mapping.Agents {
 				var ocIDs []string
@@ -343,10 +343,10 @@ func main() {
 				subagentAllowJSON = string(sa)
 			}
 
-			ao := agentstore.AgentOrchestrator{
+			ao := agentstore.AgentHarness{
 				AgentID:             agentID,
-				OrchestratorID:      "openclaw",
-				OrchestratorAgentID: oca.ID,
+				HarnessID:      "openclaw",
+				HarnessAgentID: oca.ID,
 				Enabled:             true,
 				ModelPrimary:        modelPrimary,
 				ModelFallbacks:      fallbacksJSON,
@@ -354,7 +354,7 @@ func main() {
 				IsDefault:           oca.Default,
 				SubagentAllow:       subagentAllowJSON,
 			}
-			if err := store.UpsertAgentOrchestrator(&ao); err != nil {
+			if err := store.UpsertAgentHarness(&ao); err != nil {
 				log.Fatalf("upsert ao openclaw/%s: %v", oca.ID, err)
 			}
 			fmt.Printf("    openclaw: %s → model=%s workspace=%s\n", oca.ID, modelPrimary, oca.Workspace)
@@ -365,16 +365,16 @@ func main() {
 	defaults := map[string]string{"inber": "claxon", "openclaw": "claxon", "dash": "oisin"}
 	for orchID, agentSlug := range defaults {
 		if id, ok := agentIDs[agentSlug]; ok {
-			o, err := store.GetOrchestrator(orchID)
+			o, err := store.GetHarness(orchID)
 			if err != nil {
 				continue
 			}
 			o.DefaultAgentID = agentstore.Int64Ptr(id)
-			store.UpsertOrchestrator(o)
+			store.UpsertHarness(o)
 		}
 	}
 
-	fmt.Printf("\nSeeded %d agents across %d orchestrators.\n", len(mapping.Agents), len(orchs))
+	fmt.Printf("\nSeeded %d agents across %d harnesses.\n", len(mapping.Agents), len(orchs))
 }
 
 func readFile(path string) string {

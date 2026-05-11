@@ -22,8 +22,8 @@ func registerWithHandler(mux *http.ServeMux, h *handler) {
 	mux.HandleFunc("PUT /agents/{slug}", h.updateAgent)
 	mux.HandleFunc("DELETE /agents/{slug}", h.deleteAgent)
 
-	mux.HandleFunc("GET /agents/{slug}/orchestrators", h.getOrchestrators)
-	mux.HandleFunc("POST /agents/{slug}/orchestrators", h.createOrchestrator)
+	mux.HandleFunc("GET /agents/{slug}/harnesses", h.getHarnesses)
+	mux.HandleFunc("POST /agents/{slug}/harnesses", h.createHarness)
 
 	mux.HandleFunc("GET /agents/{slug}/config", h.getAgentConfig)
 	mux.HandleFunc("GET /configs", h.getAllConfigs)
@@ -105,12 +105,12 @@ func (h *handler) listAgents(w http.ResponseWriter, r *http.Request) {
 		type expandedResponse struct {
 			Name            string  `json:"name"`
 			DisplayName     string  `json:"display_name"`
-			Orchestrator    string  `json:"orchestrator"`
+			Harness    string  `json:"harness"`
 			Emoji           string  `json:"emoji"`
 			Project         string  `json:"project"`
 			Enabled         bool    `json:"enabled"`
 			IsDefault       bool    `json:"is_default"`
-			OrchEmoji       string  `json:"orch_emoji"`
+			HarnessEmoji       string  `json:"harness_emoji"`
 			Status          string  `json:"status"`
 			StatusTask      *string `json:"status_task,omitempty"`
 			StatusSessionID *string `json:"status_session_id,omitempty"`
@@ -118,19 +118,19 @@ func (h *handler) listAgents(w http.ResponseWriter, r *http.Request) {
 		}
 		out := make([]expandedResponse, len(expanded))
 		for i, a := range expanded {
-			name := a.OrchestratorName
+			name := a.HarnessName
 			if name == "" {
 				name = a.Slug
 			}
 			out[i] = expandedResponse{
 				Name:         name,
 				DisplayName:  a.DisplayName,
-				Orchestrator: a.Orchestrator,
+				Harness: a.Harness,
 				Emoji:        a.Emoji,
 				Project:      a.Projects,
 				Enabled:      a.Enabled,
 				IsDefault:    a.IsDefault,
-				OrchEmoji:    a.OrchEmoji,
+				HarnessEmoji:    a.HarnessEmoji,
 				Status:       "idle",
 			}
 			if st, ok := statusMap[a.Slug]; ok {
@@ -233,37 +233,37 @@ func (h *handler) deleteAgent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"status": "deleted"})
 }
 
-// === Orchestrators ===
+// === Harnesses ===
 
-func (h *handler) getOrchestrators(w http.ResponseWriter, r *http.Request) {
+func (h *handler) getHarnesses(w http.ResponseWriter, r *http.Request) {
 	slug := r.PathValue("slug")
 	a, err := h.s.GetAgentBySlug(slug)
 	if err != nil {
 		writeErr(w, 404, "agent not found: "+slug)
 		return
 	}
-	orchs, err := h.s.GetAgentOrchestrators(a.ID)
+	harnesses, err := h.s.GetAgentHarnesses(a.ID)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, orchs)
+	writeJSON(w, 200, harnesses)
 }
 
-func (h *handler) createOrchestrator(w http.ResponseWriter, r *http.Request) {
+func (h *handler) createHarness(w http.ResponseWriter, r *http.Request) {
 	slug := r.PathValue("slug")
 	a, err := h.s.GetAgentBySlug(slug)
 	if err != nil {
 		writeErr(w, 404, "agent not found: "+slug)
 		return
 	}
-	var ao AgentOrchestrator
+	var ao AgentHarness
 	if err := json.NewDecoder(r.Body).Decode(&ao); err != nil {
 		writeErr(w, 400, "invalid json")
 		return
 	}
 	ao.AgentID = a.ID
-	if err := h.s.UpsertAgentOrchestrator(&ao); err != nil {
+	if err := h.s.UpsertAgentHarness(&ao); err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -274,11 +274,11 @@ func (h *handler) createOrchestrator(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) getAgentConfig(w http.ResponseWriter, r *http.Request) {
 	slug := r.PathValue("slug")
-	orchestratorID := r.URL.Query().Get("orchestrator")
-	if orchestratorID == "" {
-		orchestratorID = "inber"
+	harnessID := r.URL.Query().Get("harness")
+	if harnessID == "" {
+		harnessID = "inber"
 	}
-	cfg, err := h.s.GetFullAgentConfig(slug, orchestratorID)
+	cfg, err := h.s.GetFullAgentConfig(slug, harnessID)
 	if err != nil {
 		writeErr(w, 404, err.Error())
 		return
@@ -287,11 +287,11 @@ func (h *handler) getAgentConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) getAllConfigs(w http.ResponseWriter, r *http.Request) {
-	orchestratorID := r.URL.Query().Get("orchestrator")
-	if orchestratorID == "" {
-		orchestratorID = "inber"
+	harnessID := r.URL.Query().Get("harness")
+	if harnessID == "" {
+		harnessID = "inber"
 	}
-	configs, defaultSlug, err := h.s.GetAllAgentConfigs(orchestratorID)
+	configs, defaultSlug, err := h.s.GetAllAgentConfigs(harnessID)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -310,32 +310,32 @@ func (h *handler) reconcile(w http.ResponseWriter, r *http.Request) {
 
 	type AgentDiff struct {
 		Slug          string   `json:"slug"`
-		Orchestrators []string `json:"orchestrators"`
+		Harnesses []string `json:"harnesses"`
 		Issues        []string `json:"issues"`
 	}
 
 	var diffs []AgentDiff
-	allOrchestrators, _ := h.s.ListOrchestrators()
+	allHarnesses, _ := h.s.ListHarnesses()
 
 	for _, a := range agents {
-		orchs, err := h.s.GetAgentOrchestrators(a.ID)
+		harnesses, err := h.s.GetAgentHarnesses(a.ID)
 		if err != nil {
 			continue
 		}
 		registered := make(map[string]bool)
-		var orchNames []string
-		for _, o := range orchs {
-			registered[o.OrchestratorID] = true
-			orchNames = append(orchNames, o.OrchestratorID)
+		var harnessNames []string
+		for _, o := range harnesses {
+			registered[o.HarnessID] = true
+			harnessNames = append(harnessNames, o.HarnessID)
 		}
 		var issues []string
-		for _, o := range allOrchestrators {
+		for _, o := range allHarnesses {
 			if !registered[o.ID] && a.Enabled {
 				issues = append(issues, fmt.Sprintf("not registered in %s", o.ID))
 			}
 		}
 		if len(issues) > 0 {
-			diffs = append(diffs, AgentDiff{Slug: a.Slug, Orchestrators: orchNames, Issues: issues})
+			diffs = append(diffs, AgentDiff{Slug: a.Slug, Harnesses: harnessNames, Issues: issues})
 		}
 	}
 

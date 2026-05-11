@@ -175,17 +175,17 @@ func TestHTTPAgentConfig(t *testing.T) {
 
 	a := &Agent{Slug: "cfg-agent", DisplayName: "Cfg Agent", Role: "test role", Enabled: true}
 	s.UpsertAgent(a)
-	s.UpsertOrchestrator(&Orchestrator{ID: "inber", DisplayName: "Inber", DefaultAgentID: &a.ID})
-	s.UpsertAgentOrchestrator(&AgentOrchestrator{
-		AgentID: a.ID, OrchestratorID: "inber", OrchestratorAgentID: "cfg-agent",
+	s.UpsertHarness(&Harness{ID: "inber", DisplayName: "Inber", DefaultAgentID: &a.ID})
+	s.UpsertAgentHarness(&AgentHarness{
+		AgentID: a.ID, HarnessID: "inber", HarnessAgentID: "cfg-agent",
 		Enabled: true, ModelPrimary: "claude-sonnet-4-5", ThinkingBudget: 1024,
 		ContextBudget: 30000, ContextTags: `["code"]`, MaxTurns: 3,
 	})
 	s.SetAgentTools(a.ID, "inber", []string{"shell", "read_file"})
 	s.UpsertAgentNature(&AgentNature{AgentID: a.ID, Kind: "identity", Content: "test soul"})
 
-	// GET /agents/cfg-agent/config?orchestrator=inber
-	req := httptest.NewRequest("GET", "/agents/cfg-agent/config?orchestrator=inber", nil)
+	// GET /agents/cfg-agent/config?harness=inber
+	req := httptest.NewRequest("GET", "/agents/cfg-agent/config?harness=inber", nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 	if w.Code != 200 {
@@ -203,8 +203,8 @@ func TestHTTPAgentConfig(t *testing.T) {
 		t.Fatalf("expected soul, got %q", cfg.Soul)
 	}
 
-	// GET /configs?orchestrator=inber
-	req = httptest.NewRequest("GET", "/configs?orchestrator=inber", nil)
+	// GET /configs?harness=inber
+	req = httptest.NewRequest("GET", "/configs?harness=inber", nil)
 	w = httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 	if w.Code != 200 {

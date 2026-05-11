@@ -40,21 +40,21 @@ func TestSeedAndResolve(t *testing.T) {
 		t.Fatal("agent ID should be set")
 	}
 
-	// Create orchestrators
-	for _, o := range []Orchestrator{
+	// Create harnesses
+	for _, o := range []Harness{
 		{ID: "inber", DisplayName: "Inber"},
 		{ID: "openclaw", DisplayName: "OpenClaw"},
 	} {
-		if err := s.UpsertOrchestrator(&o); err != nil {
+		if err := s.UpsertHarness(&o); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	// Register under orchestrators
-	if err := s.UpsertAgentOrchestrator(&AgentOrchestrator{AgentID: agent.ID, OrchestratorID: "inber", OrchestratorAgentID: "test-warrior", Enabled: true}); err != nil {
+	// Register under harnesses
+	if err := s.UpsertAgentHarness(&AgentHarness{AgentID: agent.ID, HarnessID: "inber", HarnessAgentID: "test-warrior", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.UpsertAgentOrchestrator(&AgentOrchestrator{AgentID: agent.ID, OrchestratorID: "openclaw", OrchestratorAgentID: "test-project", Enabled: true}); err != nil {
+	if err := s.UpsertAgentHarness(&AgentHarness{AgentID: agent.ID, HarnessID: "openclaw", HarnessAgentID: "test-project", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -93,17 +93,17 @@ func TestSeedAndResolve(t *testing.T) {
 		t.Fatalf("expected agent ID %d, got %d", agent.ID, a3.ID)
 	}
 
-	// GetAgentOrchestrators
-	orchs, err := s.GetAgentOrchestrators(agent.ID)
+	// GetAgentHarnesses
+	harnesses, err := s.GetAgentHarnesses(agent.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(orchs) != 2 {
-		t.Fatalf("expected 2 orchestrators, got %d", len(orchs))
+	if len(harnesses) != 2 {
+		t.Fatalf("expected 2 harnesses, got %d", len(harnesses))
 	}
 
-	// GetOrchestratorAgents("inber")
-	inberAgents, err := s.GetOrchestratorAgents("inber")
+	// GetHarnessAgents("inber")
+	inberAgents, err := s.GetHarnessAgents("inber")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,22 +114,22 @@ func TestSeedAndResolve(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatal("agent not found in inber orchestrator agents")
+		t.Fatal("agent not found in inber harness agents")
 	}
 
-	// GetOrchestratorAgents("openclaw")
-	ocAgents, err := s.GetOrchestratorAgents("openclaw")
+	// GetHarnessAgents("openclaw")
+	ocAgents, err := s.GetHarnessAgents("openclaw")
 	if err != nil {
 		t.Fatal(err)
 	}
 	found = false
 	for _, ao := range ocAgents {
-		if ao.AgentID == agent.ID && ao.OrchestratorAgentID == "test-project" {
+		if ao.AgentID == agent.ID && ao.HarnessAgentID == "test-project" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatal("agent not found in openclaw orchestrator agents with correct orchestrator_agent_id")
+		t.Fatal("agent not found in openclaw harness agents with correct harness_agent_id")
 	}
 }
 
@@ -140,7 +140,7 @@ func TestFileDistributionAndDriftDetection(t *testing.T) {
 	if err := s.UpsertAgent(agent); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.UpsertOrchestrator(&Orchestrator{ID: "inber", DisplayName: "Inber"}); err != nil {
+	if err := s.UpsertHarness(&Harness{ID: "inber", DisplayName: "Inber"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -205,7 +205,7 @@ func TestNatureUpdateTriggersDistribution(t *testing.T) {
 	if err := s.UpsertAgent(agent); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.UpsertOrchestrator(&Orchestrator{ID: "inber", DisplayName: "Inber"}); err != nil {
+	if err := s.UpsertHarness(&Harness{ID: "inber", DisplayName: "Inber"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -269,7 +269,7 @@ func TestAgentDeletion(t *testing.T) {
 	if err := s.UpsertAgent(agent); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.UpsertOrchestrator(&Orchestrator{ID: "inber", DisplayName: "Inber"}); err != nil {
+	if err := s.UpsertHarness(&Harness{ID: "inber", DisplayName: "Inber"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -284,8 +284,8 @@ func TestAgentDeletion(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Add orchestrator mapping
-	if err := s.UpsertAgentOrchestrator(&AgentOrchestrator{AgentID: agent.ID, OrchestratorID: "inber", OrchestratorAgentID: "delete-me", Enabled: true}); err != nil {
+	// Add harness mapping
+	if err := s.UpsertAgentHarness(&AgentHarness{AgentID: agent.ID, HarnessID: "inber", HarnessAgentID: "delete-me", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -316,12 +316,12 @@ func TestAgentDeletion(t *testing.T) {
 		t.Fatalf("expected 0 aliases, got %d", len(aliases))
 	}
 
-	orchs, err := s.GetAgentOrchestrators(agent.ID)
+	harnesses, err := s.GetAgentHarnesses(agent.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(orchs) != 0 {
-		t.Fatalf("expected 0 orchestrators, got %d", len(orchs))
+	if len(harnesses) != 0 {
+		t.Fatalf("expected 0 harnesses, got %d", len(harnesses))
 	}
 
 	dists, err := s.ListDistributions(agent.ID)
@@ -340,18 +340,18 @@ func TestAgentToolsAndFullConfig(t *testing.T) {
 	if err := s.UpsertAgent(agent); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.UpsertOrchestrator(&Orchestrator{ID: "inber", DisplayName: "Inber", DefaultAgentID: &agent.ID}); err != nil {
+	if err := s.UpsertHarness(&Harness{ID: "inber", DisplayName: "Inber", DefaultAgentID: &agent.ID}); err != nil {
 		t.Fatal(err)
 	}
 
-	ao := AgentOrchestrator{
-		AgentID: agent.ID, OrchestratorID: "inber", OrchestratorAgentID: "warrior",
+	ao := AgentHarness{
+		AgentID: agent.ID, HarnessID: "inber", HarnessAgentID: "warrior",
 		Enabled: true, ModelPrimary: "claude-opus-4-6", ThinkingBudget: 2048,
 		ContextBudget: 50000, ContextTags: `["identity","code"]`,
 		MaxTurns: 5, MaxInputTokens: 200000, MaxResponseTime: 20,
 		Project: "warrior-project", WorkspacePath: "/home/test/warrior",
 	}
-	if err := s.UpsertAgentOrchestrator(&ao); err != nil {
+	if err := s.UpsertAgentHarness(&ao); err != nil {
 		t.Fatal(err)
 	}
 
@@ -431,24 +431,24 @@ func TestSystemPromptRefs(t *testing.T) {
 	s := testStore(t)
 
 	// Create 3 agents
-	orch := &Agent{Slug: "orchestrator", DisplayName: "Orchestrator", Enabled: true}
+	parent := &Agent{Slug: "harness", DisplayName: "Harness", Enabled: true}
 	sub1 := &Agent{Slug: "sub-agent-1", DisplayName: "Sub 1", Enabled: true}
 	sub2 := &Agent{Slug: "sub-agent-2", DisplayName: "Sub 2", Enabled: true}
-	for _, a := range []*Agent{orch, sub1, sub2} {
+	for _, a := range []*Agent{parent, sub1, sub2} {
 		if err := s.UpsertAgent(a); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	// Create orchestrator entry
-	if err := s.UpsertOrchestrator(&Orchestrator{ID: "inber", DisplayName: "Inber"}); err != nil {
+	// Create harness entry
+	if err := s.UpsertHarness(&Harness{ID: "inber", DisplayName: "Inber"}); err != nil {
 		t.Fatal(err)
 	}
 
 	// Add system prompt refs
 	for _, ref := range []*AgentSystemPromptRef{
-		{OrchestratorID: "inber", HostAgentID: orch.ID, ReferencedAgentID: sub1.ID, PromptLocation: "AGENTS.md"},
-		{OrchestratorID: "inber", HostAgentID: orch.ID, ReferencedAgentID: sub2.ID, PromptLocation: "AGENTS.md"},
+		{HarnessID: "inber", HostAgentID: parent.ID, ReferencedAgentID: sub1.ID, PromptLocation: "AGENTS.md"},
+		{HarnessID: "inber", HostAgentID: parent.ID, ReferencedAgentID: sub2.ID, PromptLocation: "AGENTS.md"},
 	} {
 		if err := s.UpsertSystemPromptRef(ref); err != nil {
 			t.Fatal(err)
@@ -456,7 +456,7 @@ func TestSystemPromptRefs(t *testing.T) {
 	}
 
 	// List refs
-	refs, err := s.ListSystemPromptRefs(orch.ID)
+	refs, err := s.ListSystemPromptRefs(parent.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,7 +469,7 @@ func TestSystemPromptRefs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	refs, err = s.ListSystemPromptRefs(orch.ID)
+	refs, err = s.ListSystemPromptRefs(parent.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

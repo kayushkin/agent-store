@@ -48,14 +48,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Ensure inber orchestrator
-	orch := agentstore.Orchestrator{
+	// Ensure inber harness
+	orch := agentstore.Harness{
 		ID:          "inber",
 		DisplayName: "Inber",
 		ConfigPath:  filepath.Join(inberPath, "agents"),
 	}
-	if err := store.UpsertOrchestrator(&orch); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create orchestrator: %v\n", err)
+	if err := store.UpsertHarness(&orch); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create harness: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -79,15 +79,15 @@ func main() {
 			os.Exit(1)
 		}
 
-		// Agent→orchestrator mapping
-		ao := agentstore.AgentOrchestrator{
+		// Agent→harness mapping
+		ao := agentstore.AgentHarness{
 			AgentID:             agent.ID,
-			OrchestratorID:      "inber",
-			OrchestratorAgentID: id,
+			HarnessID:      "inber",
+			HarnessAgentID: id,
 			Enabled:             true,
 			ModelPrimary:        cfg.Model,
 		}
-		if err := store.UpsertAgentOrchestrator(&ao); err != nil {
+		if err := store.UpsertAgentHarness(&ao); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to map agent %s: %v\n", id, err)
 			os.Exit(1)
 		}
@@ -115,7 +115,7 @@ func main() {
 		defaultAgent, err := store.GetAgentBySlug(af.Default)
 		if err == nil {
 			orch.DefaultAgentID = agentstore.Int64Ptr(defaultAgent.ID)
-			_ = store.UpsertOrchestrator(&orch)
+			_ = store.UpsertHarness(&orch)
 		}
 	}
 
