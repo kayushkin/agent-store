@@ -9,10 +9,34 @@ import (
 	"strings"
 )
 
-// RegisterHandlers registers all HTTP handlers on the given mux.
+// RegisterHandlers registers agent-store's domain handlers on the given mux.
 // Memory handlers have moved to memory-store.
+//
+// Every pattern registered here lives under a path segment agent-store owns
+// (/agents, /configs, /reconcile, /files, /versions, /seed, /context). That is
+// a hard requirement, not a convention: agent-store is embedded as a library
+// into host muxes -- llm-bridge-server mounts it into its *root* mux -- and
+// Go 1.22+ ServeMux panics at registration on a conflicting pattern. A generic
+// top-level route added here therefore takes the host process down at boot,
+// not at build time.
+//
+// Health is the process's concern, not the store's, so it is deliberately NOT
+// registered here. A standalone agent-store calls RegisterHealthHandler; an
+// embedding host already serves its own.
 func RegisterHandlers(mux *http.ServeMux, s *Store) {
 	registerWithHandler(mux, &handler{s: s})
+}
+
+// RegisterHealthHandler registers "GET /health" on the given mux.
+//
+// Only a process that owns its mux should call this -- i.e. a standalone
+// agent-store server (cmd/server). Do NOT call it from a host that embeds
+// agent-store via RegisterHandlers: the host serves its own /health, and
+// registering a second one panics the host at boot.
+func RegisterHealthHandler(mux *http.ServeMux) {
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]string{"status": "ok"})
+	})
 }
 
 func registerWithHandler(mux *http.ServeMux, h *handler) {
@@ -29,9 +53,6 @@ func registerWithHandler(mux *http.ServeMux, h *handler) {
 	mux.HandleFunc("GET /configs", h.getAllConfigs)
 
 	mux.HandleFunc("GET /reconcile", h.reconcile)
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]string{"status": "ok"})
-	})
 
 	mux.HandleFunc("GET /files", h.listFiles)
 	mux.HandleFunc("GET /files/{id}", h.getFile)

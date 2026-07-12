@@ -28,6 +28,9 @@ func main() {
 
 	mux := http.NewServeMux()
 	agentstore.RegisterHandlers(mux, store)
+	// This process owns its mux, so it serves its own /health. Hosts that
+	// embed agent-store must not -- see RegisterHealthHandler.
+	agentstore.RegisterHealthHandler(mux)
 
 	scanInterval := parseScanInterval()
 	if scanInterval > 0 {

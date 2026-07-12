@@ -134,13 +134,72 @@ func TestHTTPAgentConfig(t *testing.T) {
 	}
 }
 
+// TestHTTPHealth pins the standalone shape: a process that owns its mux
+// (cmd/server) registers the domain handlers plus its own /health.
 func TestHTTPHealth(t *testing.T) {
-	_, mux := NewTestServer(t)
+	s := testStore(t)
+	mux := http.NewServeMux()
+	RegisterHandlers(mux, s)
+	RegisterHealthHandler(mux)
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 	if w.Code != 200 {
 		t.Fatalf("health: expected 200, got %d", w.Code)
+	}
+}
+
+// TestRegisterHandlersEmbedsInHostOwningHealth pins the contract that makes
+// agent-store safe to mount as a library: RegisterHandlers must not claim any
+// pattern the host already owns.
+//
+// This is a regression test for a real outage-in-waiting. agent-store briefly
+// registered "GET /health" from RegisterHandlers; llm-bridge-server mounts
+// agent-store into its *root* mux and serves its own "GET /health", and Go
+// 1.22+ ServeMux panics on a conflicting pattern at registration time. The
+// gateway's next deploy would have built a binary that panicked at boot.
+//
+// Nothing caught it: agent-store compiled, its own tests passed (they never
+// simulated a host), and the gateway's tests construct the server with a nil
+// agent-store so its routes were never mounted under test. The panic was only
+// reachable from a real boot. Registering into a mux that already owns /health
+// -- exactly what the gateway does -- is what makes it reachable from `go test`.
+func TestRegisterHandlersEmbedsInHostOwningHealth(t *testing.T) {
+	s := testStore(t)
+
+	// A host mux that already serves its own /health, like llm-bridge-server.
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]string{"status": "host"})
+	})
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("RegisterHandlers panicked when embedded in a host mux: %v\n\n"+
+				"agent-store is mounted as a library into host muxes (llm-bridge-server "+
+				"mounts it at the root). Every pattern it registers must live under a "+
+				"segment agent-store owns -- /agents, /configs, /reconcile, /files, "+
+				"/versions, /seed, /context. A generic top-level route panics the host "+
+				"at boot. If you meant to add a process-level route, it belongs in "+
+				"cmd/server, not in RegisterHandlers.", r)
+		}
+	}()
+	RegisterHandlers(mux, s)
+
+	// The host's own /health must still be the one that answers.
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("host health: expected 200, got %d", w.Code)
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode host health: %v", err)
+	}
+	if resp["status"] != "host" {
+		t.Fatalf("host health: agent-store shadowed the host's handler, got status=%q want %q",
+			resp["status"], "host")
 	}
 }
