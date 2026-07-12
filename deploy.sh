@@ -44,8 +44,11 @@ else
 fi
 
 echo "==> Smoke test..."
-if ! curl -fsS http://localhost:8300/agents/health >/dev/null 2>&1; then
-  echo "ERROR: $SERVICE not responding on :8300/agents/health"
+# Health lives at /health (not /agents/health): this process owns its mux, so
+# cmd/server registers it via RegisterHealthHandler. The library deliberately
+# does not -- a generic route there panics hosts that embed agent-store.
+if ! curl -fsS http://localhost:8300/health >/dev/null 2>&1; then
+  echo "ERROR: $SERVICE not responding on :8300/health"
   journalctl --user -u "$SERVICE" -n 30 --no-pager 2>&1
   exit 1
 fi
