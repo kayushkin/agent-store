@@ -155,37 +155,29 @@ CODE=$(req GET /agents); expect 200 "$CODE" "GET /agents"
 assert_eq 0 "$(jget 'length')" "fresh db agent count"
 
 # ============================================================================
-step "POST /agents — create an agent and read it back"
-# The Agent struct carries NO json tags, so the wire shape is Go field names:
-# {"Slug":…,"DisplayName":…}. Single-word keys still decode from lowercase
-# ("slug" -> Slug) because encoding/json matches case-insensitively — but it does
-# NOT ignore underscores, so "display_name" does NOT reach DisplayName. See the
-# snake_case assertion below; that asymmetry is a known defect, not something
-# this smoke endorses.
+step "POST /agents — snake_case is the wire shape, and it round-trips"
+# Agent used to carry NO json tags, so its wire shape was the Go field names and
+# a snake_case "display_name" was silently dropped on write (201, empty field, no
+# error) -- while GET /agents?expanded=true handed that same field back AS
+# display_name. bridge-ui's Agents page posts snake_case, so every write it made
+# erased the display name it had just read. Agent now carries snake_case tags,
+# matching AgentStatus, FullAgentConfig and the expanded response.
 CODE=$(req POST /agents \
-  "{\"Slug\":\"$SLUG\",\"DisplayName\":\"E2E Smoke\",\"Role\":\"smoke\",\"Description\":\"created by e2e-smoke\",\"Enabled\":true}")
+  "{\"slug\":\"$SLUG\",\"display_name\":\"E2E Smoke\",\"role\":\"smoke\",\"description\":\"created by e2e-smoke\",\"enabled\":true}")
 expect 201 "$CODE" "POST /agents"
-assert_eq "$SLUG" "$(jget '.Slug')" "created agent slug"
-assert_eq "E2E Smoke" "$(jget '.DisplayName')" "created agent display name"
-assert_eq true "$(jget '.Enabled')" "created agent enabled"
+assert_eq "$SLUG" "$(jget '.slug')" "created agent slug"
+assert_eq "E2E Smoke" "$(jget '.display_name')" "created agent display name"
+assert_eq true "$(jget '.enabled')" "created agent enabled"
 
-step "KNOWN DEFECT pin — a snake_case display_name is silently DROPPED on write"
-# GET /agents?expanded=true returns `display_name` (that struct HAS json tags),
-# while POST /agents and GET /agents/{slug} speak `DisplayName`. So the read shape
-# and the write shape disagree about the name of the same field, and a client
-# that posts the snake_case one gets a 201 with an EMPTY display name and no error.
-# Nothing on the box does this today, which is why it has survived.
-#
-# This assertion pins the CURRENT behaviour so the defect cannot quietly change
-# under us. Adding json tags to Agent is the fix, but it rewrites the wire format
-# of routes dash reads, so it is an API-break decision -- noteboard todo below.
-# WHEN THAT IS FIXED, THIS ASSERTION SHOULD FAIL. That is the point: it will make
-# whoever fixes it come here, read this, and check dash.
-CODE=$(req POST /agents "{\"Slug\":\"$SLUG-snake\",\"display_name\":\"dropped on the floor\"}")
-expect 201 "$CODE" "POST /agents with a snake_case display_name"
-assert_eq "" "$(jget '.DisplayName')" \
-  "snake_case display_name is silently dropped (known defect — see agent-store todo)"
-CODE=$(req DELETE "/agents/$SLUG-snake"); expect 200 "$CODE" "clean up the snake_case agent"
+step "write routes REJECT an unknown field instead of dropping it"
+# The whole defect above was survivable only because an unmapped field was a
+# silent 201. Every write path now DisallowUnknownFields, so the next wire-shape
+# mismatch is a loud 400 on the first request rather than data loss discovered
+# months later. PascalCase is no longer the wire shape, so it must be refused.
+CODE=$(req POST /agents "{\"slug\":\"$SLUG-camel\",\"DisplayName\":\"not the wire shape\"}")
+expect 400 "$CODE" "POST /agents with a PascalCase DisplayName"
+CODE=$(req GET "/agents/$SLUG-camel")
+expect 404 "$CODE" "the rejected agent was NOT created"
 
 step "POST /agents — slug is required"
 CODE=$(req POST /agents '{"display_name":"nameless"}')
@@ -193,21 +185,30 @@ expect 400 "$CODE" "POST /agents with no slug"
 
 step "GET /agents/{slug} — read the agent back out of sqlite"
 CODE=$(req GET "/agents/$SLUG"); expect 200 "$CODE" "GET /agents/{slug}"
-assert_eq "$SLUG" "$(jget '.Slug')" "read-back slug"
-assert_eq "created by e2e-smoke" "$(jget '.Description')" "read-back description"
-assert_eq smoke "$(jget '.Role')" "read-back role"
+assert_eq "$SLUG" "$(jget '.slug')" "read-back slug"
+assert_eq "created by e2e-smoke" "$(jget '.description')" "read-back description"
+assert_eq smoke "$(jget '.role')" "read-back role"
 
 step "GET /agents — the new agent is in the list, with a status merged in"
 CODE=$(req GET /agents); expect 200 "$CODE" "GET /agents"
 assert_eq 1 "$(jget 'length')" "agent count"
-assert_eq "$SLUG" "$(jget '.[0].Slug')" "listed agent slug"
+assert_eq "$SLUG" "$(jget '.[0].slug')" "listed agent slug"
 assert_eq idle "$(jget '.[0].status')" "listed agent default status"
 
-step "PUT /agents/{slug} — update, and the change persists"
-CODE=$(req PUT "/agents/$SLUG" '{"DisplayName":"E2E Renamed","Role":"smoke"}')
+step "PUT /agents/{slug} — a field the client OMITS keeps its stored value"
+# UpsertAgent writes every column, so decoding a PUT into a blank Agent made it a
+# full replace. bridge-ui never sends `role` at all and sends `description` only
+# from its edit form -- so ticking an agent's Enabled checkbox erased both, plus
+# the display name. PUT now decodes ONTO the stored agent: omission means "leave
+# it alone". This body is exactly what bridge-ui's toggleEnabled() sends.
+CODE=$(req PUT "/agents/$SLUG" \
+  "{\"slug\":\"$SLUG\",\"display_name\":\"E2E Renamed\",\"emoji\":\"\",\"projects\":\"\",\"enabled\":false}")
 expect 200 "$CODE" "PUT /agents/{slug}"
 CODE=$(req GET "/agents/$SLUG"); expect 200 "$CODE" "GET after PUT"
-assert_eq "E2E Renamed" "$(jget '.DisplayName')" "updated display name"
+assert_eq "E2E Renamed" "$(jget '.display_name')" "updated display name"
+assert_eq false "$(jget '.enabled')" "the toggle itself took effect"
+assert_eq smoke "$(jget '.role')" "role survived a PUT that never mentioned it"
+assert_eq "created by e2e-smoke" "$(jget '.description')" "description survived the same PUT"
 
 step "GET /agents/{slug} — unknown slug is a 404, not a panic"
 CODE=$(req GET /agents/no-such-agent); expect 404 "$CODE" "GET unknown agent"

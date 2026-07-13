@@ -124,17 +124,25 @@ func now() int64 { return time.Now().Unix() }
 // AGENTS
 // ============================================
 
+// Agent is the wire shape of /agents. The json tags are load-bearing, not
+// cosmetic: without them encoding/json falls back to the Go field names, and
+// while it matches those case-insensitively it does NOT ignore underscores --
+// so a snake_case "display_name" would not reach DisplayName and would be
+// dropped on write with a cheerful 201. That is exactly what happened here, and
+// it destroyed the display name of every agent that bridge-ui's Agents page
+// ever wrote. snake_case is the convention the rest of this store already
+// speaks (AgentStatus, FullAgentConfig, and the ?expanded=true response).
 type Agent struct {
-	ID          int64
-	Slug        string
-	DisplayName string
-	Emoji       string
-	Projects    string // comma-separated
-	Description string
-	Role        string
-	Enabled     bool
-	CreatedAt   int64
-	UpdatedAt   int64
+	ID          int64  `json:"id"`
+	Slug        string `json:"slug"`
+	DisplayName string `json:"display_name"`
+	Emoji       string `json:"emoji"`
+	Projects    string `json:"projects"` // comma-separated
+	Description string `json:"description"`
+	Role        string `json:"role"`
+	Enabled     bool   `json:"enabled"`
+	CreatedAt   int64  `json:"created_at"`
+	UpdatedAt   int64  `json:"updated_at"`
 }
 
 func boolToInt(b bool) int {
@@ -337,27 +345,31 @@ func (s *Store) DeleteHarness(id string) error {
 // AGENT ORCHESTRATORS
 // ============================================
 
+// AgentHarness is the wire shape of /agents/{slug}/harnesses. It carried the
+// same untagged defect as Agent, and worse: almost every field here is
+// multi-word, so a snake_case client silently lost nearly the whole config.
+// See the note on Agent for the mechanism.
 type AgentHarness struct {
-	AgentID             int64
-	HarnessID      string
-	HarnessAgentID string
-	Enabled             bool
-	ModelPrimary        string
-	ModelFallbacks      string // JSON array
-	WorkspacePath       string
-	ThinkingBudget      int
-	ContextBudget       int
-	ContextTags         string // JSON array
-	MaxTurns            int
-	MaxInputTokens      int
-	MaxResponseTime     int // seconds
-	SystemPrompt        string
-	Project             string
-	Shelved             bool
-	IsDefault           bool
-	SubagentAllow       string // JSON array, e.g. '["*"]'
-	CreatedAt           int64
-	UpdatedAt           int64
+	AgentID         int64  `json:"agent_id"`
+	HarnessID       string `json:"harness_id"`
+	HarnessAgentID  string `json:"harness_agent_id"`
+	Enabled         bool   `json:"enabled"`
+	ModelPrimary    string `json:"model_primary"`
+	ModelFallbacks  string `json:"model_fallbacks"` // JSON array
+	WorkspacePath   string `json:"workspace_path"`
+	ThinkingBudget  int    `json:"thinking_budget"`
+	ContextBudget   int    `json:"context_budget"`
+	ContextTags     string `json:"context_tags"` // JSON array
+	MaxTurns        int    `json:"max_turns"`
+	MaxInputTokens  int    `json:"max_input_tokens"`
+	MaxResponseTime int    `json:"max_response_time"` // seconds
+	SystemPrompt    string `json:"system_prompt"`
+	Project         string `json:"project"`
+	Shelved         bool   `json:"shelved"`
+	IsDefault       bool   `json:"is_default"`
+	SubagentAllow   string `json:"subagent_allow"` // JSON array, e.g. '["*"]'
+	CreatedAt       int64  `json:"created_at"`
+	UpdatedAt       int64  `json:"updated_at"`
 }
 
 func (s *Store) UpsertAgentHarness(ao *AgentHarness) error {

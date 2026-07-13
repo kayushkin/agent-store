@@ -200,10 +200,22 @@ func (h *handler) getAgent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, a)
 }
 
+// decodeStrict decodes a request body and REFUSES any field it does not know,
+// rather than dropping it on the floor. An unmapped field is a client that
+// believes it wrote something the store never stored; answering 201 to that is
+// silent data loss. This is the guard that would have caught the untagged-Agent
+// defect the day it was introduced instead of after it had wiped every display
+// name, so it is deliberately applied to every write path, not just that one.
+func decodeStrict(r *http.Request, dst any) error {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	return dec.Decode(dst)
+}
+
 func (h *handler) createAgent(w http.ResponseWriter, r *http.Request) {
 	var a Agent
-	if err := json.NewDecoder(r.Body).Decode(&a); err != nil {
-		writeErr(w, 400, "invalid json")
+	if err := decodeStrict(r, &a); err != nil {
+		writeErr(w, 400, err.Error())
 		return
 	}
 	if a.Slug == "" {
@@ -224,9 +236,16 @@ func (h *handler) updateAgent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "agent not found: "+slug)
 		return
 	}
-	var a Agent
-	if err := json.NewDecoder(r.Body).Decode(&a); err != nil {
-		writeErr(w, 400, "invalid json")
+	// Decode ONTO the existing agent, so a field the client omits keeps its
+	// stored value instead of being zeroed. UpsertAgent writes every column, so
+	// decoding into a blank Agent made PUT a full replace: bridge-ui's Agents
+	// page never sends `role` at all, and sends `description` only from the edit
+	// form -- so toggling an agent's Enabled checkbox erased both. Omission now
+	// means "leave it alone"; a client that genuinely wants to clear a field
+	// still can, by sending it explicitly as "".
+	a := *existing
+	if err := decodeStrict(r, &a); err != nil {
+		writeErr(w, 400, err.Error())
 		return
 	}
 	a.ID = existing.ID
@@ -279,8 +298,8 @@ func (h *handler) createHarness(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var ao AgentHarness
-	if err := json.NewDecoder(r.Body).Decode(&ao); err != nil {
-		writeErr(w, 400, "invalid json")
+	if err := decodeStrict(r, &ao); err != nil {
+		writeErr(w, 400, err.Error())
 		return
 	}
 	ao.AgentID = a.ID
