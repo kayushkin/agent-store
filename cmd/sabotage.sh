@@ -215,11 +215,28 @@ run_case "no-op: len()>0 becomes len()!=0" UNNOTICED "$SEED" \
 	'	if len(ia.Projects) != 0 {'
 
 echo
-echo "=== deliberately NOT scored, and why ==="
-echo "seed's empty-inber-name blanking: the test pins it as CURRENT behaviour,"
-echo "  not as correct behaviour, so there is no mechanism here to revert. A row"
-echo "  mutating it would score whichever way the pin happens to point and would"
-echo "  read as though the question were settled. It is not; it is filed."
+echo "=== the pin on undecided behaviour ==="
+
+# This row nearly did not get written. seed's empty-inber-name blanking is
+# pinned as CURRENT behaviour rather than fixed, so the first instinct was that
+# there is no mechanism to revert and nothing to score.
+#
+# That was wrong, and a per-test necessity run is what showed it: the pin test
+# was the only test in either package that reddened for NO mutation, which reads
+# as theatre. The missing mutation is the repair itself -- guard the override the
+# way cmd/migrate-inber guards it. A pin that does not redden when the pinned
+# behaviour changes is not pinning anything, and this is the row that proves it
+# does.
+#
+# So CAUGHT here does not mean the mutation is wrong. It means that whoever makes
+# seed agree with migrate-inber will be told by a failing test, and will have to
+# close the divergence card deliberately rather than discover the change later in
+# a diff of display names.
+run_case "pin: empty inber name stops blanking" CAUGHT "$SEED" \
+	'	identity.DisplayName = ia.Name' \
+	'	if ia.Name != "" {
+		identity.DisplayName = ia.Name
+	}'
 
 echo
 echo "scored: $pass ok, $fail not ok"
