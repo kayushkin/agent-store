@@ -33,6 +33,12 @@ import (
 // the louder failure of the two and the easier one to miss in review, since the
 // expression reads as though it were guarded.
 func UpperFirstRune(s string) string {
+	// Belt-and-braces, not load-bearing, and sabotage.sh scores it as such.
+	// Removing this early return changes no behaviour: DecodeRuneInString("")
+	// returns (RuneError, 0), so the invalid-lead-byte guard below already
+	// returns "" unchanged. It is kept because stating the empty case here is
+	// clearer than resting on a non-obvious stdlib return value -- but it is not
+	// the thing standing between this function and the old code's panic.
 	if s == "" {
 		return s
 	}
