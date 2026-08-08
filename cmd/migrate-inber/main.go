@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	agentstore "github.com/kayushkin/agent-store"
 	"github.com/kayushkin/agent-store/internal/textutil"
@@ -20,6 +22,71 @@ type inberAgentConfig struct {
 	Name  string `json:"name"`
 	Role  string `json:"role"`
 	Model string `json:"model"`
+}
+
+// plannedAgent is what main() derives from one agents.json entry before it
+// touches the database: the whole read-only half of the migration loop.
+//
+// It is split out so the derivation can be tested without a store, a filesystem
+// or an inber checkout. Testing textutil.UpperFirstRune on its own does not
+// cover this — the helper is not where either of this file's two panics lived.
+type plannedAgent struct {
+	Slug        string
+	DisplayName string
+	Role        string
+	Model       string
+}
+
+// planMigration derives the agent rows main() upserts, in slug order.
+//
+// It refuses the whole file rather than returning a partial plan when an entry's
+// config is null. That case is reachable from a hand-edited agents.json —
+// `{"agents": {"ghost": null}}` parses without error into a nil map value — and
+// every use of it in the migration loop (Name, Role, Model) is an unguarded
+// dereference. Rejecting it here keeps the loop below free of nil checks and
+// matches how this tool already treats every other malformed input: say what is
+// wrong and exit non-zero.
+//
+// The slug order is deliberate. Ranging a map directly, as this loop used to,
+// migrates agents in a different order on every run, which makes the tool's
+// output impossible to diff against a previous run.
+func planMigration(af inberAgentsFile) ([]plannedAgent, error) {
+	var nullConfigs []string
+	for id, cfg := range af.Agents {
+		if cfg == nil {
+			nullConfigs = append(nullConfigs, id)
+		}
+	}
+	if len(nullConfigs) > 0 {
+		sort.Strings(nullConfigs)
+		return nil, fmt.Errorf("agents.json has null config for: %s", strings.Join(nullConfigs, ", "))
+	}
+
+	planned := make([]plannedAgent, 0, len(af.Agents))
+	for id, cfg := range af.Agents {
+		planned = append(planned, plannedAgent{
+			Slug:        id,
+			DisplayName: displayNameFor(id, cfg.Name),
+			Role:        cfg.Role,
+			Model:       cfg.Model,
+		})
+	}
+	sort.Slice(planned, func(i, j int) bool { return planned[i].Slug < planned[j].Slug })
+	return planned, nil
+}
+
+// displayNameFor picks the name shown for an agent: the one configured in
+// agents.json, or the agent's own id with its first rune upper-cased when no
+// name is configured.
+//
+// The id comes in as a JSON object key, so it is arbitrary text. An empty key
+// and a key whose first letter is multi-byte are both legal JSON and both broke
+// the byte-indexed spelling this replaced.
+func displayNameFor(id, configuredName string) string {
+	if configuredName != "" {
+		return configuredName
+	}
+	return textutil.UpperFirstRune(id)
 }
 
 func main() {
@@ -61,17 +128,20 @@ func main() {
 
 	agentsDir := filepath.Join(inberPath, "agents")
 
-	fmt.Printf("Migrating %d agents...\n", len(af.Agents))
-	for id, cfg := range af.Agents {
-		displayName := textutil.UpperFirstRune(id)
-		if cfg.Name != "" {
-			displayName = cfg.Name
-		}
+	planned, err := planMigration(af)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to read agents: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Migrating %d agents...\n", len(planned))
+	for _, p := range planned {
+		id := p.Slug
 
 		agent := agentstore.Agent{
 			Slug:        id,
-			DisplayName: displayName,
-			Role:        cfg.Role,
+			DisplayName: p.DisplayName,
+			Role:        p.Role,
 			Enabled:     true,
 		}
 		if err := store.UpsertAgent(&agent); err != nil {
@@ -85,7 +155,7 @@ func main() {
 			HarnessID:      "inber",
 			HarnessAgentID: id,
 			Enabled:             true,
-			ModelPrimary:        cfg.Model,
+			ModelPrimary:        p.Model,
 		}
 		if err := store.UpsertAgentHarness(&ao); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to map agent %s: %v\n", id, err)

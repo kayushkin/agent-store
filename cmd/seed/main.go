@@ -93,6 +93,63 @@ func hash(s string) string {
 	return hex.EncodeToString(h[:])
 }
 
+// agentIdentity is the part of an agent row that seed derives from config
+// rather than reading straight out of it: the three fields where mapping.json
+// and inber's agents.json can each supply a value.
+//
+// Split out of main()'s loop so it can be tested without a database, an inber
+// checkout or a mapping file. The helper it calls, textutil.UpperFirstRune, has
+// its own tests; those cannot see this, because the defect this file carried
+// was in how the id reached the helper, not in the helper.
+type agentIdentity struct {
+	DisplayName string
+	Role        string
+	Projects    string
+}
+
+// inberSlugFor returns the agents.json key a mapping.json entry points at, and
+// whether it points at one at all. A mapping entry with no "inber" field is not
+// an inber agent and must not be looked up: the zero slug would match an entry
+// keyed by the empty string if agents.json ever grew one.
+func inberSlugFor(ma MappingAgent) (string, bool) {
+	if ma.Inber == nil {
+		return "", false
+	}
+	return *ma.Inber, true
+}
+
+// resolveAgentIdentity derives an agent's display name, role and projects from
+// its mapping.json entry, letting a matching inber agents.json entry override
+// all three.
+//
+// The display name falls back to the agent's own id with its first rune
+// upper-cased. ids come from mapping.json, so they are arbitrary text: "" and a
+// multi-byte first letter are both legal and both broke the byte-indexed
+// spelling this replaced.
+func resolveAgentIdentity(ma MappingAgent, ia InberAgent, hasInber bool) agentIdentity {
+	identity := agentIdentity{
+		DisplayName: textutil.UpperFirstRune(ma.ID),
+		Projects:    ma.Project,
+	}
+	if !hasInber {
+		return identity
+	}
+
+	// Note: this assigns ia.Name unconditionally, so an inber entry with no
+	// name blanks a display name that was already derived from the id. That is
+	// this tool's behaviour today and is pinned as such in the tests, not
+	// endorsed; cmd/migrate-inber guards the same override with a != "" check.
+	// Reconciling the two is filed separately.
+	identity.DisplayName = ia.Name
+	identity.Role = ia.Role
+	if len(ia.Projects) > 0 {
+		identity.Projects = strings.Join(ia.Projects, ",")
+	} else if ia.Project != "" {
+		identity.Projects = ia.Project
+	}
+	return identity
+}
+
 func main() {
 	dbPath := os.Getenv("AGENT_STORE_DB")
 	if dbPath == "" {
@@ -163,32 +220,21 @@ func main() {
 	agentIDs := map[string]int64{}
 
 	for _, ma := range mapping.Agents {
-		displayName := textutil.UpperFirstRune(ma.ID)
-		role := ""
-		projects := ma.Project
-
 		// Override from inber config if present
-		var inberSlug string
-		if ma.Inber != nil {
-			inberSlug = *ma.Inber
+		inberSlug, pointsAtInber := inberSlugFor(ma)
+		var ia InberAgent
+		hasInber := false
+		if pointsAtInber {
+			ia, hasInber = inberCfg.Agents[inberSlug]
 		}
-		ia, hasInber := inberCfg.Agents[inberSlug]
-		if hasInber {
-			displayName = ia.Name
-			role = ia.Role
-			if len(ia.Projects) > 0 {
-				projects = strings.Join(ia.Projects, ",")
-			} else if ia.Project != "" {
-				projects = ia.Project
-			}
-		}
+		identity := resolveAgentIdentity(ma, ia, hasInber)
 
 		agent := agentstore.Agent{
 			Slug:        ma.ID,
-			DisplayName: displayName,
+			DisplayName: identity.DisplayName,
 			Emoji:       ma.Emoji,
-			Projects:    projects,
-			Role:        role,
+			Projects:    identity.Projects,
+			Role:        identity.Role,
 			Enabled:     true,
 		}
 		if err := store.UpsertAgent(&agent); err != nil {
