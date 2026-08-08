@@ -70,8 +70,16 @@ func runAutoScanner(store *agentstore.Store, interval time.Duration) {
 		if err != nil {
 			log.Printf("auto-scan: %v", err)
 		} else if res.Added > 0 || res.Updated > 0 || res.Missing > 0 {
-			log.Printf("auto-scan: %d scanned (%d new, %d updated, %d missing)",
-				res.Scanned, res.Added, res.Updated, res.Missing)
+			// This condition is a noise gate: a scan that found nothing must
+			// say nothing, or the interesting runs are unfindable. It only
+			// works because Updated counts content changes. While Updated
+			// meant "the row already existed" the gate was true on every run
+			// -- measured 2026-08-08, 2641 of this service's 2657 journal
+			// lines were this message reporting zero real work, one every 15
+			// minutes since 2026-07-11, with the handful of genuine 1-new and
+			// 2-missing runs buried among them.
+			log.Printf("auto-scan: %d scanned (%d new, %d updated, %d unchanged, %d missing)",
+				res.Scanned, res.Added, res.Updated, res.Unchanged, res.Missing)
 		}
 		time.Sleep(interval)
 	}

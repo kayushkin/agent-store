@@ -153,12 +153,36 @@ func (s *Store) agentSlugFromPath(path, scope string) string {
 }
 
 // ScanResult is the aggregate of one full scan.
+//
+// Added, Updated and Unchanged are disjoint and together account for every
+// file the walk visited, so Added+Updated+Unchanged == Scanned. Missing is
+// counted over rows the walk did NOT reach (their file is gone), so it is
+// deliberately outside that identity -- do not "fix" it into the sum.
+//
+// Updated means the file's content hash differs from the one on the row. It
+// used to mean "a row for this path already existed", which made it identical
+// to Scanned-Added on every run and left callers no way to tell an edit from a
+// no-op. AGENTS.md tells agents to POST /files/scan to confirm an out-of-band
+// edit landed; Updated is the number they read to confirm it, so it has to
+// mean what its name says.
 type ScanResult struct {
-	Scanned int `json:"scanned"`
-	Added   int `json:"added"`
-	Updated int `json:"updated"`
-	Missing int `json:"missing"`
+	Scanned   int `json:"scanned"`
+	Added     int `json:"added"`
+	Updated   int `json:"updated"`
+	Unchanged int `json:"unchanged"`
+	Missing   int `json:"missing"`
 }
+
+// upsertOutcome says what one visited file did to the store. It exists because
+// the previous bool ("was this row newly inserted?") could not distinguish an
+// edit from a no-op, which is the whole question a scan is asked.
+type upsertOutcome int
+
+const (
+	upsertAdded upsertOutcome = iota
+	upsertUpdated
+	upsertUnchanged
+)
 
 // Scan walks $HOME (with a curated set of skip paths), classifies every
 // matching file, and upserts tracked_files rows. Rows whose underlying file
@@ -174,22 +198,22 @@ func (s *Store) Scan() (*ScanResult, error) {
 
 	// Absolute paths to skip during the walk.
 	skipPaths := map[string]bool{
-		filepath.Join(home, ".config"):                          true,
-		filepath.Join(home, ".codex"):                           true,
-		filepath.Join(home, ".cache"):                           true,
-		filepath.Join(home, "forge", "envs"):                    true,
-		filepath.Join(home, ".claude", "plugins"):               true,
-		filepath.Join(home, ".claude", "skills"):                true,
-		filepath.Join(home, ".claude", "cache"):                 true,
-		filepath.Join(home, ".claude", "sessions"):              true,
-		filepath.Join(home, ".claude", "file-history"):          true,
-		filepath.Join(home, ".claude", "backups"):               true,
-		filepath.Join(home, ".claude", "debug"):                 true,
-		filepath.Join(home, ".claude", "downloads"):             true,
-		filepath.Join(home, ".claude", "shell-snapshots"):       true,
-		filepath.Join(home, ".claude", "telemetry"):             true,
-		filepath.Join(home, ".claude", "session-env"):           true,
-		filepath.Join(home, ".claude", "mcp-needs-auth-cache"):  true,
+		filepath.Join(home, ".config"):                         true,
+		filepath.Join(home, ".codex"):                          true,
+		filepath.Join(home, ".cache"):                          true,
+		filepath.Join(home, "forge", "envs"):                   true,
+		filepath.Join(home, ".claude", "plugins"):              true,
+		filepath.Join(home, ".claude", "skills"):               true,
+		filepath.Join(home, ".claude", "cache"):                true,
+		filepath.Join(home, ".claude", "sessions"):             true,
+		filepath.Join(home, ".claude", "file-history"):         true,
+		filepath.Join(home, ".claude", "backups"):              true,
+		filepath.Join(home, ".claude", "debug"):                true,
+		filepath.Join(home, ".claude", "downloads"):            true,
+		filepath.Join(home, ".claude", "shell-snapshots"):      true,
+		filepath.Join(home, ".claude", "telemetry"):            true,
+		filepath.Join(home, ".claude", "session-env"):          true,
+		filepath.Join(home, ".claude", "mcp-needs-auth-cache"): true,
 	}
 
 	res := &ScanResult{}
@@ -210,7 +234,7 @@ func (s *Store) Scan() (*ScanResult, error) {
 			return
 		}
 		slug := s.agentSlugFromPath(canon, scope)
-		fileID, added, err := s.upsertTrackedFile(canon, scope, slug, enabled, hash, size, mtime)
+		fileID, outcome, err := s.upsertTrackedFile(canon, scope, slug, enabled, hash, size, mtime)
 		if err != nil {
 			return
 		}
@@ -226,10 +250,13 @@ func (s *Store) Scan() (*ScanResult, error) {
 			}
 		}
 		res.Scanned++
-		if added {
+		switch outcome {
+		case upsertAdded:
 			res.Added++
-		} else {
+		case upsertUpdated:
 			res.Updated++
+		case upsertUnchanged:
+			res.Unchanged++
 		}
 	}
 
@@ -296,26 +323,40 @@ func (s *Store) Scan() (*ScanResult, error) {
 
 // upsertTrackedFile inserts or updates the row for `path` and returns
 // (id, added, err). `added` is true when the row was newly inserted.
-func (s *Store) upsertTrackedFile(path, scope, agentSlug string, enabled bool, hash string, size, mtime int64) (int64, bool, error) {
+// upsertTrackedFile writes the row for one visited file and reports which of
+// the three outcomes it was. The stored fs_hash is read back in the same query
+// as the id so the comparison costs no extra round trip: it is the only thing
+// that distinguishes an edit from a re-scan of an untouched file.
+func (s *Store) upsertTrackedFile(path, scope, agentSlug string, enabled bool, hash string, size, mtime int64) (int64, upsertOutcome, error) {
 	var id int64
-	err := s.db.QueryRow("SELECT id FROM tracked_files WHERE path = ?", path).Scan(&id)
+	var storedHash string
+	err := s.db.QueryRow("SELECT id, COALESCE(fs_hash,'') FROM tracked_files WHERE path = ?", path).Scan(&id, &storedHash)
 	if err == nil {
+		// The row is rewritten either way: scope, agent_slug and enabled can
+		// change without the content changing, and last_scanned_at has to
+		// advance on every pass. Only the reported outcome turns on the hash.
 		_, err := s.db.Exec(`
 			UPDATE tracked_files
 			SET scope=?, agent_slug=?, enabled=?, fs_hash=?, size=?, mtime=?, last_scanned_at=?, status='present', updated_at=?
 			WHERE id=?`,
 			scope, nullIfEmpty(agentSlug), boolToInt(enabled), hash, size, mtime, now(), now(), id)
-		return id, false, err
+		if err != nil {
+			return id, upsertUnchanged, err
+		}
+		if storedHash == hash {
+			return id, upsertUnchanged, nil
+		}
+		return id, upsertUpdated, nil
 	}
 	res, err := s.db.Exec(`
 		INSERT INTO tracked_files (path, scope, agent_slug, enabled, fs_hash, size, mtime, last_scanned_at, status, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'present', ?, ?)`,
 		path, scope, nullIfEmpty(agentSlug), boolToInt(enabled), hash, size, mtime, now(), now(), now())
 	if err != nil {
-		return 0, false, err
+		return 0, upsertUnchanged, err
 	}
 	id, _ = res.LastInsertId()
-	return id, true, nil
+	return id, upsertAdded, nil
 }
 
 func nullIfEmpty(s string) any {
