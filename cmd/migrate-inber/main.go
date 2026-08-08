@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	agentstore "github.com/kayushkin/agent-store"
+	"github.com/kayushkin/agent-store/internal/textutil"
 )
 
 type inberAgentsFile struct {
@@ -63,7 +63,7 @@ func main() {
 
 	fmt.Printf("Migrating %d agents...\n", len(af.Agents))
 	for id, cfg := range af.Agents {
-		displayName := strings.ToUpper(id[:1]) + id[1:]
+		displayName := textutil.UpperFirstRune(id)
 		if cfg.Name != "" {
 			displayName = cfg.Name
 		}
