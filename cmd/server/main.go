@@ -69,7 +69,7 @@ func runAutoScanner(store *agentstore.Store, interval time.Duration) {
 		res, err := store.Scan()
 		if err != nil {
 			log.Printf("auto-scan: %v", err)
-		} else if res.Added > 0 || res.Updated > 0 || res.Missing > 0 {
+		} else if res.Added > 0 || res.Updated > 0 || res.Missing > 0 || len(res.Errors) > 0 {
 			// This condition is a noise gate: a scan that found nothing must
 			// say nothing, or the interesting runs are unfindable. It only
 			// works because Updated counts content changes. While Updated
@@ -78,8 +78,19 @@ func runAutoScanner(store *agentstore.Store, interval time.Duration) {
 			// lines were this message reporting zero real work, one every 15
 			// minutes since 2026-07-11, with the handful of genuine 1-new and
 			// 2-missing runs buried among them.
-			log.Printf("auto-scan: %d scanned (%d new, %d updated, %d unchanged, %d missing)",
-				res.Scanned, res.Added, res.Updated, res.Unchanged, res.Missing)
+			//
+			// Errors joined the gate because a run that dropped a file is
+			// exactly an interesting run, and it is the only reader that never
+			// sees the JSON the HTTP handler returns. Scanned is an undercount
+			// whenever the last number is nonzero, so the line says so rather
+			// than leaving a reader to notice the arithmetic.
+			log.Printf("auto-scan: %d scanned (%d new, %d updated, %d unchanged, %d missing, %d failed)",
+				res.Scanned, res.Added, res.Updated, res.Unchanged, res.Missing, len(res.Errors))
+			// One line per failure: a count tells nobody which file went
+			// unrecorded, and that is the question the scan was asked.
+			for _, e := range res.Errors {
+				log.Printf("auto-scan: unaccounted %s (%s): %s", e.Path, e.Stage, e.Err)
+			}
 		}
 		time.Sleep(interval)
 	}

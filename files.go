@@ -165,12 +165,51 @@ func (s *Store) agentSlugFromPath(path, scope string) string {
 // no-op. AGENTS.md tells agents to POST /files/scan to confirm an out-of-band
 // edit landed; Updated is the number they read to confirm it, so it has to
 // mean what its name says.
+//
+// Errors names everything the scan could not account for, and it is what makes
+// the identity above safe to read. That identity holds over survivors: while a
+// file that failed to hash or failed to upsert was dropped from every counter,
+// Added+Updated+Unchanged == Scanned stayed perfectly true on a scan that
+// silently covered fewer files than the box has, so a partial run was
+// indistinguishable from a complete one. Errors is deliberately outside the
+// sum, like Missing -- a non-empty Errors means Scanned is an undercount.
+//
+// It is a list rather than a count because of who reads it. AGENTS.md tells
+// agents to POST /files/scan to confirm one particular edit landed, and
+// "errors: 1" does not tell them whether the dropped file was theirs. len()
+// gives the count, so there is no second number to go stale.
+//
+// A failed file does not abort the sweep: a scan that covers 153 of 154 files
+// and says which one it missed is more useful than one that returns an error.
 type ScanResult struct {
-	Scanned   int `json:"scanned"`
-	Added     int `json:"added"`
-	Updated   int `json:"updated"`
-	Unchanged int `json:"unchanged"`
-	Missing   int `json:"missing"`
+	Scanned   int         `json:"scanned"`
+	Added     int         `json:"added"`
+	Updated   int         `json:"updated"`
+	Unchanged int         `json:"unchanged"`
+	Missing   int         `json:"missing"`
+	Errors    []ScanError `json:"errors"`
+}
+
+// ScanError is one file the scan could not account for, named at the point of
+// failure. Stage says which step gave up, because the three mean different
+// things: a file that would not hash is on disk and unreadable, one that would
+// not upsert was read fine and the DB refused it, and one that would not mark
+// missing is a row still claiming to be present.
+type ScanError struct {
+	Path  string `json:"path"`
+	Stage string `json:"stage"`
+	Err   string `json:"error"`
+}
+
+const (
+	scanStageHash        = "hash"
+	scanStageUpsert      = "upsert"
+	scanStageMarkMissing = "mark_missing"
+)
+
+// fail records one unaccounted-for file on the result.
+func (r *ScanResult) fail(path, stage string, err error) {
+	r.Errors = append(r.Errors, ScanError{Path: path, Stage: stage, Err: err.Error()})
 }
 
 // upsertOutcome says what one visited file did to the store. It exists because
@@ -231,11 +270,16 @@ func (s *Store) Scan() (*ScanResult, error) {
 		seen[canon] = true
 		hash, size, mtime, err := hashFile(path)
 		if err != nil {
+			// A file we classified as tracked but cannot read (permissions, or
+			// a delete racing the walk) is a hole in the scan, not a file that
+			// was never there. Name it.
+			res.fail(path, scanStageHash, err)
 			return
 		}
 		slug := s.agentSlugFromPath(canon, scope)
 		fileID, outcome, err := s.upsertTrackedFile(canon, scope, slug, enabled, hash, size, mtime)
 		if err != nil {
+			res.fail(canon, scanStageUpsert, err)
 			return
 		}
 		// History capture: if the on-disk hash isn't already in our version log
@@ -314,7 +358,13 @@ func (s *Store) Scan() (*ScanResult, error) {
 		if _, err := os.Stat(c.path + ".disabled"); err == nil {
 			continue
 		}
-		s.db.Exec("UPDATE tracked_files SET status='missing', updated_at=? WHERE id=?", now(), c.id)
+		if _, err := s.db.Exec("UPDATE tracked_files SET status='missing', updated_at=? WHERE id=?", now(), c.id); err != nil {
+			// The row still says 'present'. Reporting it as Missing would
+			// claim a write that did not happen -- the same lie as dropping a
+			// failed file, in the other direction.
+			res.fail(c.path, scanStageMarkMissing, err)
+			continue
+		}
 		res.Missing++
 	}
 

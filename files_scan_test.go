@@ -268,3 +268,175 @@ func TestScanRevertToEarlierContentIsUpdatedButAppendsNoVersion(t *testing.T) {
 		t.Errorf("content A is already in history, want %d versions, got %d", beforeRevert, afterRevert)
 	}
 }
+
+// errorsByStage groups a scan's unaccounted-for files by the step that gave
+// up, so a test can assert on the failure it injected and not on unrelated
+// ones.
+func errorsByStage(res *ScanResult, stage string) []ScanError {
+	var out []ScanError
+	for _, e := range res.Errors {
+		if e.Stage == stage {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// A clean scan must report no errors at all. This is the control for the three
+// tests below: without it, an assertion that a broken scan reports one error
+// would also pass on a scan that reports an error for every file.
+func TestScanReportsNoErrorsWhenEveryFileIsReadable(t *testing.T) {
+	scanFixture(t, map[string]string{
+		"CLAUDE.md":         "first",
+		"AGENTS.md":         "second",
+		".claude/CLAUDE.md": "third",
+	})
+	s := testStore(t)
+
+	res, err := s.Scan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Errors) != 0 {
+		t.Fatalf("want no errors on a readable tree, got %+v", res.Errors)
+	}
+	if res.Scanned != 3 {
+		t.Fatalf("setup: want 3 scanned, got %d", res.Scanned)
+	}
+}
+
+// A tracked file the scan cannot read must be named, not dropped. Before this,
+// both error paths in visitFile returned without touching any counter, so the
+// file was absent from Scanned, from Added/Updated/Unchanged and from Missing
+// -- a partial scan that was well-formed, self-consistent and indistinguishable
+// from a complete one.
+func TestScanNamesAFileItCannotHashInsteadOfDroppingIt(t *testing.T) {
+	home := scanFixture(t, map[string]string{
+		"CLAUDE.md":         "first",
+		"AGENTS.md":         "second",
+		".claude/CLAUDE.md": "third",
+	})
+	s := testStore(t)
+
+	// A real permission failure on a real file: hashFile stats it fine and
+	// then cannot read it. Nothing is mocked.
+	unreadable := filepath.Join(home, "AGENTS.md")
+	if err := os.Chmod(unreadable, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(unreadable, 0o644) })
+
+	res, err := s.Scan()
+	if err != nil {
+		t.Fatalf("one unreadable file must not fail the whole sweep: %v", err)
+	}
+
+	hashErrs := errorsByStage(res, "hash")
+	if len(hashErrs) != 1 {
+		t.Fatalf("want exactly 1 hash error, got %d (%+v)", len(hashErrs), res.Errors)
+	}
+	if hashErrs[0].Path != unreadable {
+		t.Errorf("the error must name the file that was dropped, want %s, got %s", unreadable, hashErrs[0].Path)
+	}
+	if hashErrs[0].Err == "" {
+		t.Error("want the underlying error carried through, got empty string")
+	}
+
+	// The other two files still scanned, and Scanned excludes the dropped one:
+	// the report says "2 of 3", which is the whole point.
+	if res.Scanned != 2 {
+		t.Errorf("want 2 scanned, got %d (%+v)", res.Scanned, res)
+	}
+	if res.Added != 2 {
+		t.Errorf("want 2 added, got %d (%+v)", res.Added, res)
+	}
+	if res.Added+res.Updated+res.Unchanged != res.Scanned {
+		t.Errorf("the disjoint identity must still hold over the files that survived: %+v", res)
+	}
+}
+
+// A file that reads fine and that the database then refuses is the second hole,
+// and it is a different fault from an unreadable file -- so it gets its own
+// stage rather than being folded into one count. query_only makes every write
+// fail for real, without mocking the store.
+func TestScanNamesAFileTheDatabaseRefusesToUpsert(t *testing.T) {
+	scanFixture(t, map[string]string{
+		"CLAUDE.md":         "first",
+		"AGENTS.md":         "second",
+		".claude/CLAUDE.md": "third",
+	})
+	s := testStore(t)
+
+	if _, err := s.db.Exec("PRAGMA query_only = ON"); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := s.Scan()
+	if err != nil {
+		t.Fatalf("a refusing database must not fail the whole sweep: %v", err)
+	}
+
+	upsertErrs := errorsByStage(res, "upsert")
+	if len(upsertErrs) != 3 {
+		t.Fatalf("want all 3 files named as upsert failures, got %d (%+v)", len(upsertErrs), res.Errors)
+	}
+	if res.Scanned != 0 {
+		t.Errorf("no file was recorded, so want Scanned 0, got %d (%+v)", res.Scanned, res)
+	}
+	for _, e := range upsertErrs {
+		if e.Path == "" || e.Err == "" {
+			t.Errorf("every named failure needs a path and a reason, got %+v", e)
+		}
+	}
+}
+
+// The third hole runs the other way: a row whose file is gone was counted as
+// Missing whether or not the UPDATE marking it missing succeeded, so the report
+// claimed a write that never happened.
+func TestScanDoesNotCountAMissingRowItFailedToMark(t *testing.T) {
+	home := scanFixture(t, map[string]string{
+		"CLAUDE.md": "first",
+		"AGENTS.md": "second",
+	})
+	s := testStore(t)
+
+	if first, err := s.Scan(); err != nil {
+		t.Fatal(err)
+	} else if first.Added != 2 {
+		t.Fatalf("setup: want 2 added, got %d", first.Added)
+	}
+
+	gone := filepath.Join(home, "AGENTS.md")
+	if err := os.Remove(gone); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("PRAGMA query_only = ON"); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := s.Scan()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if res.Missing != 0 {
+		t.Errorf("the UPDATE failed, so the row still says present -- want Missing 0, got %d (%+v)", res.Missing, res)
+	}
+	markErrs := errorsByStage(res, "mark_missing")
+	if len(markErrs) != 1 {
+		t.Fatalf("want the unmarked row named once, got %d (%+v)", len(markErrs), res.Errors)
+	}
+	if markErrs[0].Path != gone {
+		t.Errorf("want the error to name %s, got %s", gone, markErrs[0].Path)
+	}
+
+	// And the row really is still present, which is what makes Missing 0 the
+	// honest answer rather than a smaller lie.
+	var status string
+	if err := s.db.QueryRow("SELECT status FROM tracked_files WHERE path = ?", gone).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "present" {
+		t.Errorf("want the row left at present after a failed mark, got %q", status)
+	}
+}
