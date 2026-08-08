@@ -152,14 +152,21 @@ run_case "empty-string guard removed" UNNOTICED \
 	'	if false {'
 
 echo
-echo "=== known gaps, reported rather than hidden ==="
-echo "cmd/seed and cmd/migrate-inber call sites: NOT SCORED."
-echo "  Both are package main with no test files, so reverting either call site"
-echo "  to the byte cut reddens nothing. They are covered by the helper's"
-echo "  guarantee and by the compiler (the old spelling needs the strings import"
-echo "  back), but not by an assertion. A harness that quietly omitted these rows"
-echo "  would score a tidier number and measure less."
+echo "=== the gap this script used to report is now closed ==="
+echo "cmd/seed and cmd/migrate-inber call sites: SCORED, in cmd/sabotage.sh."
+echo "  This section used to read 'NOT SCORED ... reverting either call site to"
+echo "  the byte cut reddens nothing', which was true when written and is not"
+echo "  now. Both call sites have tests and both revert-to-byte-cut rows come"
+echo "  back CAUGHT. Run the two scripts together: this one scores the helper,"
+echo "  that one scores the callers."
+echo
+echo "  One correction worth carrying over. This script's claim that the old"
+echo "  spelling is caught by the compiler 'needing the strings import back' is"
+echo "  backwards as a safety net: at a call site it orphans the textutil import"
+echo "  instead, and go test reports that as a non-zero exit that looks exactly"
+echo "  like a failing assertion. cmd/sabotage.sh classifies a build failure as"
+echo "  VOID for that reason. A compiler error is not coverage."
 
 echo
-echo "scored: $pass ok, $fail not ok, 2 known gap(s)"
+echo "scored: $pass ok, $fail not ok"
 [ "$fail" -eq 0 ] || exit 1
