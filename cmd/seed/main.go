@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	agentstore "github.com/kayushkin/agent-store"
+	"github.com/kayushkin/agent-store/internal/textutil"
 )
 
 // mapping.json structures
@@ -162,7 +163,7 @@ func main() {
 	agentIDs := map[string]int64{}
 
 	for _, ma := range mapping.Agents {
-		displayName := strings.ToUpper(ma.ID[:1]) + ma.ID[1:]
+		displayName := textutil.UpperFirstRune(ma.ID)
 		role := ""
 		projects := ma.Project
 
