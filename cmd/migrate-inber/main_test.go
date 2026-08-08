@@ -148,6 +148,12 @@ func TestPlanMigrationNamesEveryNullConfigNotJustTheFirst(t *testing.T) {
 			t.Errorf("error %q does not name %q", err, id)
 		}
 	}
+	// Sorted, for the same reason the plan itself is sorted: the ids come out of
+	// a map, so an unsorted message names them in a different order on every run
+	// and two runs over one broken file cannot be diffed.
+	if strings.Index(err.Error(), "ghost") > strings.Index(err.Error(), "wraith") {
+		t.Errorf("error %q names the null configs out of order, want them sorted", err)
+	}
 }
 
 // TestPlanMigrationPrefersAConfiguredNameOverTheId pins the override that sits
@@ -181,16 +187,20 @@ func TestPlanMigrationFallsBackToTheIdWhenTheConfiguredNameIsEmpty(t *testing.T)
 //
 // Ranging a map is randomised per run, so the tool used to migrate in a
 // different order every time and its output could not be diffed against a
-// previous run. Three entries, because two agree with reverse order half the
-// time by chance.
+// previous run.
+//
+// Five entries, not three, because this test's job is to redden when the sort
+// is removed and an unsorted map happens to come out in order anyway. At three
+// entries that is one run in six — a flaky detector that reports a real hole as
+// intermittent. At five it is one in 120.
 func TestPlanMigrationOrdersAgentsBySlug(t *testing.T) {
 	planned, err := planMigration(parseAgentsFile(t,
-		`{"agents": {"oisin": {}, "brigid": {}, "manannan": {}}}`))
+		`{"agents": {"oisin": {}, "brigid": {}, "manannan": {}, "claxon": {}, "scathach": {}}}`))
 	if err != nil {
 		t.Fatalf("planMigration: unexpected error: %v", err)
 	}
 
-	want := []string{"brigid", "manannan", "oisin"}
+	want := []string{"brigid", "claxon", "manannan", "oisin", "scathach"}
 	if len(planned) != len(want) {
 		t.Fatalf("planned %d agents, want %d", len(planned), len(want))
 	}
