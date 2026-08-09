@@ -42,6 +42,37 @@ if [ -n "$(git status --porcelain -- "$SRC")" ]; then
 	exit 1
 fi
 
+# textutil.go is a deliberately broken version of itself from the mutate below
+# until the `git checkout --` that follows it, so every way out of that window has
+# to restore -- including the ways this script does not choose to take. A killed
+# run left the mutated file behind as ordinary-looking uncommitted work: a
+# semantic edit to a tracked source file, which `git status` reports the same way
+# it reports real work in progress, and which this box's standing rule tells the
+# next agent not to throw away. The refusal at the top of this script then blocks
+# the next run, because of the mess the last one made.
+#
+# Measured by kill on this scorer before this trap existed: SIGTERM and SIGHUP
+# each left textutil.go mutated. Those are exactly what a wall-clock cap, systemd
+# and a process-group kill send at an unattended run -- so the gap was not a
+# corner case, it was the normal way this script gets stopped.
+#
+# The handler restores, clears the trap and re-raises, so the process dies BY the
+# signal (rc 128+signum). A handler that restores and exits 0 tells every caller a
+# killed run succeeded.
+#
+# SIGKILL cannot be caught by the process that receives it. It is the one gap left
+# here, and it is named rather than papered over.
+on_signal() { # <signal name>
+	git checkout -- "$SRC"
+	trap - "$1"
+	kill -s "$1" $$
+}
+
+for sig in INT TERM HUP; do
+	# shellcheck disable=SC2064  # expand $sig now: the handler must name its own signal
+	trap "on_signal $sig" "$sig"
+done
+
 pass=0
 fail=0
 
