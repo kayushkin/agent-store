@@ -45,8 +45,15 @@ Case-writing rules inherited from the scheduler and bundle-store plans:
   - An UNNOTICED row is a claim about which LINE the engine moved before it is a
     claim about the tests (218th).
 
-Score when filed by the 221st pass: 12/12 real mechanisms caught, both controls
+Score when filed by the 221st pass: 13/13 real mechanisms caught, both controls
 behaved, exit 0.
+
+⚠️ One of those 13 exists because the first full run scored a false-looking
+UNNOTICED and the case's NAME was the thing that was wrong, not the tests. See
+the comment on the no-op-guard case below: a mechanism can be dominated in every
+path a reasonable test would exercise, and the row then reads as a coverage hole
+in tests that are complete. The fix was one test driving the only separating
+input, plus a case name that stopped claiming an effect the edit does not have.
 
 ⚠️ Region this plan does NOT cover, declared rather than left to be
 rediscovered. Every case below edits the enable switch, `DiskPath`, and the two
@@ -81,7 +88,12 @@ PACKAGES = ["."]
 CASES = [
     # ---- the guard that makes the switch idempotent ----
     Case(
-        "the no-op guard is dropped, so disabling an already-disabled file renames it to .disabled.disabled",
+        # ⚠️ This case was first named "...renames it to .disabled.disabled", which is
+        # false, and it scored UNNOTICED against six tests that all believed it. When the
+        # row already holds the requested state, `from` and `to` are the SAME path by
+        # construction, so the body degrades to os.Rename(x, x) — a success that moves
+        # nothing. The guard is dominated everywhere except on a file that is not on disk.
+        "the no-op guard is dropped, so a redundant call stats a file it has no reason to need",
         [("if f.Enabled == enable {", "if false {")],
     ),
     Case(
