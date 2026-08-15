@@ -203,6 +203,44 @@ func TestSettingTheStateTheRowAlreadyHasMovesNothing(t *testing.T) {
 	mustNotExist(t, sentinel+".disabled", "disabling an already-disabled row")
 }
 
+// The no-op guard's ONLY observable effect, and it is not the obvious one.
+//
+// When f.Enabled already equals enable, `from` and `to` compute to the same
+// path by construction — DiskPath() and the `to` expression are the same
+// function of the same bool — so deleting the guard turns the body into
+// os.Rename(x, x), which succeeds and moves nothing. Every happy-path assertion
+// about a redundant call therefore passes with the guard gone, which is exactly
+// what the scorer reported: the row for "the no-op guard is dropped" came back
+// UNNOTICED against the six tests above.
+//
+// The one input that separates them is a file that is not on disk. With the
+// guard, a redundant disable is a success because there is nothing to do; with
+// it gone, the stat fails and the caller is told the file is missing. That is
+// the right contract — asking for the state a row already has must not depend
+// on the filesystem — and this is the only test that can see it.
+func TestARedundantCallSucceedsEvenWhenTheFileIsNotOnDisk(t *testing.T) {
+	home, s := enabledFixture(t, map[string]string{"CLAUDE.md": "ORIGINAL"})
+	f := rowFor(t, s, home, "CLAUDE.md")
+
+	if _, err := s.SetTrackedFileEnabled(f.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(home, "CLAUDE.md.disabled")); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.SetTrackedFileEnabled(f.ID, false)
+	if err != nil {
+		t.Fatalf("a redundant disable consulted the filesystem and failed: %v", err)
+	}
+	if got == nil {
+		t.Fatal("a redundant disable returned no row")
+	}
+	if got.Enabled {
+		t.Error("the returned row reports enabled")
+	}
+}
+
 // A source file that is not where the row says it is must be an error, and the
 // row must survive it unchanged. Writing the row anyway would record a move
 // that did not happen and point every later read at nothing.
