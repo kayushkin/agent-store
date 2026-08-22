@@ -132,6 +132,13 @@ func (s *Store) ListVersions(trackedFileID int64) ([]TrackedFileVersion, error) 
 
 // LatestVersion returns the most recent version for a tracked file, or nil
 // (no error) if there is none yet.
+//
+// ⚠️ Newest is not the same as what is on disk. Scan's history guard searches
+// the whole version log, so reverting a file to content it has held before
+// appends nothing and leaves the newest row holding the superseded content.
+// To ask what a file currently holds, use FindVersionByHash with the row's
+// FSHash. This method has no caller today; BuildSeedManifest used to be one
+// and shipped the wrong bytes to every runner because of exactly that.
 func (s *Store) LatestVersion(trackedFileID int64) (*TrackedFileVersion, error) {
 	var id int64
 	err := s.db.QueryRow(`
@@ -376,8 +383,16 @@ type SeedManifest struct {
 
 // BuildSeedManifest assembles the manifest for one machine. It walks every
 // enabled, present tracked file whose scope is in the machine's profile and
-// whose path can be rewritten to a $HOME-relative install path. Files with
-// no version yet are skipped — the bridge can't push what it hasn't recorded.
+// whose path can be rewritten to a $HOME-relative install path. Files whose
+// on-disk content is not in the version log are skipped — the bridge can't
+// push what it hasn't recorded.
+//
+// Each entry names the version holding the bytes currently on disk, found by
+// hash. It deliberately does not use LatestVersion: newest and current are the
+// same row for every edit except a revert to content the file has held before,
+// and on a revert Scan appends nothing (its guard searches the whole history),
+// so the newest row is the superseded content. Resolving by hash makes the
+// manifest correct without touching how history is recorded.
 func (s *Store) BuildSeedManifest(machineID string) (*SeedManifest, error) {
 	prof, err := s.EnsureSeedProfile(machineID)
 	if err != nil {
@@ -412,12 +427,18 @@ func (s *Store) BuildSeedManifest(machineID string) (*SeedManifest, error) {
 		if !ok {
 			continue
 		}
-		v, err := s.LatestVersion(f.ID)
+		if f.FSHash == "" {
+			// Never hashed, so there is nothing to match a version against.
+			continue
+		}
+		v, err := s.FindVersionByHash(f.ID, f.FSHash)
 		if err != nil {
-			return nil, fmt.Errorf("latest version for %d: %w", f.ID, err)
+			return nil, fmt.Errorf("version by disk hash for %d: %w", f.ID, err)
 		}
 		if v == nil {
-			// No version recorded yet — skip until a save or scan-import lands one.
+			// The bytes on disk were never recorded — skip until a save or
+			// scan-import lands them, rather than advertise other content
+			// under this path.
 			continue
 		}
 		mf.Entries = append(mf.Entries, SeedManifestEntry{
