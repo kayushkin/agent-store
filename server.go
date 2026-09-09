@@ -61,6 +61,12 @@ func registerWithHandler(mux *http.ServeMux, h *handler) {
 	mux.HandleFunc("POST /files/{id}/enable", h.enableFile)
 	mux.HandleFunc("POST /files/{id}/disable", h.disableFile)
 	mux.HandleFunc("POST /files/scan", h.scanFiles)
+	mux.HandleFunc("GET /prompt-collections", h.listPromptCollections)
+	mux.HandleFunc("POST /prompt-collections", h.createPromptCollection)
+	mux.HandleFunc("POST /prompt-collections/{id}/sections", h.createPromptSection)
+	mux.HandleFunc("POST /prompt-collections/{id}/compile", h.compilePromptCollection)
+	mux.HandleFunc("PUT /prompt-sections/{id}", h.updatePromptSection)
+	mux.HandleFunc("DELETE /prompt-sections/{id}", h.deletePromptSection)
 
 	// History (every UI save / drift / runner-detected change is a version row).
 	mux.HandleFunc("GET /files/{id}/versions", h.listFileVersions)
@@ -84,7 +90,7 @@ type handler struct {
 	// by llm-bridge-server (which embeds agent-store) to broadcast seed deltas
 	// to every connected runner. nil = no broadcast (standalone agent-store
 	// invocation, or a deployment without runners).
-	onFileSaved   func(*TrackedFile, *TrackedFileVersion)
+	onFileSaved     func(*TrackedFile, *TrackedFileVersion)
 	onScanCompleted func(*ScanResult)
 }
 
@@ -126,12 +132,12 @@ func (h *handler) listAgents(w http.ResponseWriter, r *http.Request) {
 		type expandedResponse struct {
 			Name            string  `json:"name"`
 			DisplayName     string  `json:"display_name"`
-			Harness    string  `json:"harness"`
+			Harness         string  `json:"harness"`
 			Emoji           string  `json:"emoji"`
 			Project         string  `json:"project"`
 			Enabled         bool    `json:"enabled"`
 			IsDefault       bool    `json:"is_default"`
-			HarnessEmoji       string  `json:"harness_emoji"`
+			HarnessEmoji    string  `json:"harness_emoji"`
 			Status          string  `json:"status"`
 			StatusTask      *string `json:"status_task,omitempty"`
 			StatusSessionID *string `json:"status_session_id,omitempty"`
@@ -146,12 +152,12 @@ func (h *handler) listAgents(w http.ResponseWriter, r *http.Request) {
 			out[i] = expandedResponse{
 				Name:         name,
 				DisplayName:  a.DisplayName,
-				Harness: a.Harness,
+				Harness:      a.Harness,
 				Emoji:        a.Emoji,
 				Project:      a.Projects,
 				Enabled:      a.Enabled,
 				IsDefault:    a.IsDefault,
-				HarnessEmoji:    a.HarnessEmoji,
+				HarnessEmoji: a.HarnessEmoji,
 				Status:       "idle",
 			}
 			if st, ok := statusMap[a.Slug]; ok {
@@ -349,9 +355,9 @@ func (h *handler) reconcile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type AgentDiff struct {
-		Slug          string   `json:"slug"`
+		Slug      string   `json:"slug"`
 		Harnesses []string `json:"harnesses"`
-		Issues        []string `json:"issues"`
+		Issues    []string `json:"issues"`
 	}
 
 	var diffs []AgentDiff
@@ -699,4 +705,3 @@ func (h *handler) getSeedState(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, state)
 }
-

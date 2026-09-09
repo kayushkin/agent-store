@@ -292,6 +292,41 @@ CREATE INDEX IF NOT EXISTS idx_tracked_file_versions_file ON tracked_file_versio
 CREATE INDEX IF NOT EXISTS idx_tracked_file_versions_sha ON tracked_file_versions(tracked_file_id, sha256);
 
 -- ============================================
+-- STRUCTURED PROMPT SOURCES
+-- ============================================
+-- These rows are the editable source sections. The compiled CLAUDE.md and
+-- AGENTS.md files stay in tracked_files / tracked_file_versions as the
+-- materialized outputs the harnesses and runners consume.
+
+CREATE TABLE IF NOT EXISTS prompt_collections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug TEXT UNIQUE NOT NULL,
+    title TEXT NOT NULL,
+    scope TEXT NOT NULL,                   -- global, project
+    root_path TEXT NOT NULL,               -- $HOME for global, repo root for project
+    description TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_prompt_collections_scope_root ON prompt_collections(scope, root_path);
+
+CREATE TABLE IF NOT EXISTS prompt_sections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    collection_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    heading TEXT,
+    body TEXT NOT NULL,
+    applies_to TEXT NOT NULL,              -- all, claude, agents
+    priority INTEGER NOT NULL DEFAULT 0,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    source_path TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (collection_id) REFERENCES prompt_collections(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_prompt_sections_collection ON prompt_sections(collection_id, priority, id);
+
+-- ============================================
 -- MACHINE SEED PROFILES (per-runner opt-in scopes)
 -- ============================================
 -- One row per machine. scopes is a JSON array of scope names the runner
