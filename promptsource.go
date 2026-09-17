@@ -497,15 +497,28 @@ func (s *Store) inPromptTransaction(fn func(tx *sql.Tx) error) error {
 	return tx.Commit()
 }
 
-// CreatePromptSection adds a section and renders the collection. When
-// section.Position is 0 the section goes last.
-func (s *Store) CreatePromptSection(collectionID int64, section *PromptSection, note string) (*PromptRenderResult, error) {
+// CreatePromptSection adds a section and renders the collection. Placement,
+// first rule that applies: afterSectionID names the section it follows (the
+// collection is renumbered when the neighbours leave no room); else a non-zero
+// section.Position is taken as given; else the section goes last.
+func (s *Store) CreatePromptSection(collectionID int64, section *PromptSection, afterSectionID int64, note string) (*PromptRenderResult, error) {
 	if _, err := s.getPromptCollection(collectionID); err != nil {
 		return nil, err
 	}
 	section.CollectionID = collectionID
 	err := s.inPromptTransaction(func(tx *sql.Tx) error {
-		if section.Position == 0 {
+		switch {
+		case afterSectionID != 0:
+			var owner int64
+			if err := tx.QueryRow(`SELECT collection_id FROM prompt_sections WHERE id=?`, afterSectionID).Scan(&owner); err != nil || owner != collectionID {
+				return fmt.Errorf("after_section_id %d is not a section of collection %d", afterSectionID, collectionID)
+			}
+			position, err := promptSectionPositionForInsert(tx, collectionID, PromptDriftOperation{AfterSectionID: afterSectionID})
+			if err != nil {
+				return err
+			}
+			section.Position = position
+		case section.Position == 0:
 			var last sql.NullInt64
 			if err := tx.QueryRow(`SELECT MAX(position) FROM prompt_sections WHERE collection_id=?`, collectionID).Scan(&last); err != nil {
 				return err

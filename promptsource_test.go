@@ -262,11 +262,11 @@ func TestDismissedDriftIsOverwrittenButKept(t *testing.T) {
 func TestSectionBodyThatWouldReadBackAsTwoSectionsIsRefused(t *testing.T) {
 	f := newPromptFixture(t)
 	id := f.importHost()
-	_, err := f.store.CreatePromptSection(id, &PromptSection{Heading: "## A", Body: "x\n\n## B\n\ny", Enabled: true}, "")
+	_, err := f.store.CreatePromptSection(id, &PromptSection{Heading: "## A", Body: "x\n\n## B\n\ny", Enabled: true}, 0, "")
 	if err == nil {
 		t.Fatal("accepted a body holding a section-level heading")
 	}
-	if _, err := f.store.CreatePromptSection(id, &PromptSection{Heading: "## A", Body: "```\n## B\n```", Enabled: true}, ""); err != nil {
+	if _, err := f.store.CreatePromptSection(id, &PromptSection{Heading: "## A", Body: "```\n## B\n```", Enabled: true}, 0, ""); err != nil {
 		t.Fatalf("refused a heading-like line inside a code fence: %v", err)
 	}
 }
@@ -399,15 +399,29 @@ func TestLevelAndTitleDescribeASectionAndTheHeadingFollows(t *testing.T) {
 	id := f.importHost()
 
 	group := &PromptSection{Level: 1, Title: "House rules", Enabled: true}
-	if _, err := f.store.CreatePromptSection(id, group, ""); err != nil {
+	if _, err := f.store.CreatePromptSection(id, group, 0, ""); err != nil {
 		t.Fatalf("a group with no text of its own was refused: %v", err)
 	}
 	if group.Heading != "# House rules" {
 		t.Fatalf("heading = %q, want it composed from level and title", group.Heading)
 	}
 	child := &PromptSection{Level: 2, Title: "Shoes off", Body: "At the door.", Enabled: true}
-	if _, err := f.store.CreatePromptSection(id, child, ""); err != nil {
+	if _, err := f.store.CreatePromptSection(id, child, 0, ""); err != nil {
 		t.Fatal(err)
+	}
+
+	// Placed after the group by id, it must land before the imported sections that follow.
+	first, _ := f.store.ListPromptSections(id)
+	placed := &PromptSection{Level: 2, Title: "Placed", Body: "here", Enabled: true}
+	if _, err := f.store.CreatePromptSection(id, placed, first[0].ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	ordered, _ := f.store.ListPromptSections(id)
+	if ordered[1].ID != placed.ID {
+		t.Fatalf("section placed after %d landed at index != 1: %v", first[0].ID, ordered[1].Title)
+	}
+	if _, err := f.store.CreatePromptSection(id, &PromptSection{Level: 2, Title: "Lost", Body: "x", Enabled: true}, 999999, ""); err == nil {
+		t.Fatal("accepted an after_section_id from nowhere")
 	}
 
 	child.Title, child.Heading = "Shoes off indoors", ""
@@ -429,7 +443,7 @@ func TestLevelAndTitleDescribeASectionAndTheHeadingFollows(t *testing.T) {
 		"a level deeper than a split": {Level: 3, Title: "Deep", Body: "x"},
 		"a two-line title":            {Level: 2, Title: "a\nb", Body: "x"},
 	} {
-		if _, err := f.store.CreatePromptSection(id, bad, ""); err == nil {
+		if _, err := f.store.CreatePromptSection(id, bad, 0, ""); err == nil {
 			t.Fatalf("accepted %s", name)
 		}
 	}

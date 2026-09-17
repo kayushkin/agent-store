@@ -114,8 +114,10 @@ type promptSectionWrite struct {
 	Body     string   `json:"body"`
 	Tags     []string `json:"tags"`
 	Position int      `json:"position"`
-	Enabled  *bool    `json:"enabled"`
-	Note     string   `json:"note"`
+	// AfterSectionID places a new section right after an existing one. Create only.
+	AfterSectionID int64  `json:"after_section_id"`
+	Enabled        *bool  `json:"enabled"`
+	Note           string `json:"note"`
 }
 
 func (b promptSectionWrite) section() (*PromptSection, error) {
@@ -145,7 +147,7 @@ func (h *handler) createPromptSection(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	result, err := h.s.CreatePromptSection(id, section, body.Note)
+	result, err := h.s.CreatePromptSection(id, section, body.AfterSectionID, body.Note)
 	if err != nil {
 		writeStoreErr(w, err, 400)
 		return
@@ -163,6 +165,10 @@ func (h *handler) updatePromptSection(w http.ResponseWriter, r *http.Request) {
 	var body promptSectionWrite
 	if err := decodeStrict(r, &body); err != nil {
 		writeErr(w, 400, err.Error())
+		return
+	}
+	if body.AfterSectionID != 0 {
+		writeErr(w, 400, "after_section_id places a new section; to move an existing one, set position")
 		return
 	}
 	if body.Position == 0 {
