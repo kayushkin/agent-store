@@ -106,10 +106,11 @@ func (h *handler) createPromptCollection(w http.ResponseWriter, r *http.Request)
 }
 
 // promptSectionWrite is the body of a section create or update. note is the
-// reason for the change and lands on the revision.
+// reason for the change and lands on the revision. There is no heading field:
+// the store composes the heading line from level and title.
 type promptSectionWrite struct {
+	Level    *int     `json:"level"` // required: 0 is a real level, so an absent one cannot be told from it
 	Title    string   `json:"title"`
-	Heading  string   `json:"heading"`
 	Body     string   `json:"body"`
 	Tags     []string `json:"tags"`
 	Position int      `json:"position"`
@@ -117,12 +118,15 @@ type promptSectionWrite struct {
 	Note     string   `json:"note"`
 }
 
-func (b promptSectionWrite) section() *PromptSection {
+func (b promptSectionWrite) section() (*PromptSection, error) {
+	if b.Level == nil {
+		return nil, errors.New("level is required: 0 for text with no heading, 1 for a group, 2 for a section in a group")
+	}
 	enabled := true
 	if b.Enabled != nil {
 		enabled = *b.Enabled
 	}
-	return &PromptSection{Title: b.Title, Heading: b.Heading, Body: b.Body, Tags: b.Tags, Position: b.Position, Enabled: enabled}
+	return &PromptSection{Level: *b.Level, Title: b.Title, Body: b.Body, Tags: b.Tags, Position: b.Position, Enabled: enabled}, nil
 }
 
 func (h *handler) createPromptSection(w http.ResponseWriter, r *http.Request) {
@@ -136,7 +140,12 @@ func (h *handler) createPromptSection(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	result, err := h.s.CreatePromptSection(id, body.section(), body.Note)
+	section, err := body.section()
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	result, err := h.s.CreatePromptSection(id, section, body.Note)
 	if err != nil {
 		writeStoreErr(w, err, 400)
 		return
@@ -164,7 +173,12 @@ func (h *handler) updatePromptSection(w http.ResponseWriter, r *http.Request) {
 		}
 		body.Position = existing.Position
 	}
-	result, err := h.s.UpdatePromptSection(id, body.section(), body.Note)
+	section, err := body.section()
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	result, err := h.s.UpdatePromptSection(id, section, body.Note)
 	if err != nil {
 		writeStoreErr(w, err, 400)
 		return

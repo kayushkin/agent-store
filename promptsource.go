@@ -56,9 +56,18 @@ type PromptCollection struct {
 // PromptSection is one piece of the prompt. It names no harness and no file:
 // every harness receives every enabled section of the collections that apply
 // to its working directory.
+//
+// A section is described by Level and Title. Level 1 is a group, level 2 a
+// section inside the group above it, level 0 text with no heading of its own
+// (only sensible at the very top of a collection). Heading is the markdown
+// line those two compose ("## Title") and is never written by a caller: two
+// fields that could each say what a section is called disagreed the first time
+// anyone edited one of them. A level-1 section with no body is an ordinary
+// thing — a group that only holds sections — and is not an empty section.
 type PromptSection struct {
 	ID           int64    `json:"id"`
 	CollectionID int64    `json:"collection_id"`
+	Level        int      `json:"level"`
 	Title        string   `json:"title"`
 	Heading      string   `json:"heading"`
 	Body         string   `json:"body"`
@@ -317,6 +326,7 @@ func scanPromptSection(row rowScanner) (*PromptSection, error) {
 	}
 	section.Tags = decodeTags(tags)
 	section.Enabled = enabled == 1
+	section.Level = promptSectionHeadingLevel(section.Heading)
 	return &section, nil
 }
 
@@ -336,27 +346,71 @@ func renderPromptSections(sections []PromptSection) string {
 	return RenderPromptMarkdown(markdown)
 }
 
+// promptSectionHeadingLevel is the number of leading '#' of a heading line, 0
+// for no heading.
+func promptSectionHeadingLevel(heading string) int {
+	level := 0
+	for level < len(heading) && heading[level] == '#' {
+		level++
+	}
+	return level
+}
+
+// ComposePromptSectionHeading is the one place a heading line is built.
+func ComposePromptSectionHeading(level int, title string) string {
+	if level == 0 {
+		return ""
+	}
+	return strings.Repeat("#", level) + " " + title
+}
+
+// validatePromptSection settles a section's Level, Title and Heading so the
+// three always agree, and refuses one that would not read back from a rendered
+// file as exactly itself. A caller holding a heading line cut from a file
+// (import, drift) sets Heading; every other caller sets Level and Title.
 func validatePromptSection(section *PromptSection) error {
-	section.Heading = strings.TrimSpace(section.Heading)
 	section.Body = trimTrailingSpaceLines(strings.Trim(strings.ReplaceAll(section.Body, "\r\n", "\n"), "\n"))
 	section.Title = strings.TrimSpace(section.Title)
-	if section.Heading != "" && !isPromptSectionHeading(section.Heading) {
-		return fmt.Errorf("heading must be a level-1 or level-2 markdown heading line, got %q", section.Heading)
+	section.Heading = strings.TrimSpace(section.Heading)
+	if section.Heading != "" {
+		if !isPromptSectionHeading(section.Heading) || strings.Contains(section.Heading, "\n") {
+			return fmt.Errorf("heading %q is not one level-1 or level-2 markdown heading line", section.Heading)
+		}
+		section.Level = promptSectionHeadingLevel(section.Heading)
+		section.Title = PromptSectionTitleFromHeading(section.Heading)
 	}
-	if strings.Contains(section.Heading, "\n") {
-		return errors.New("heading must be one line")
+	if section.Level < 0 || section.Level > promptSectionDeepestHeadingLevel {
+		return fmt.Errorf("level must be 0 (no heading) to %d, got %d", promptSectionDeepestHeadingLevel, section.Level)
 	}
-	if section.Heading == "" && section.Body == "" {
-		return errors.New("a section needs a heading or a body")
+	if strings.ContainsAny(section.Title, "\r\n") {
+		return errors.New("title must be one line")
 	}
+	if section.Level > 0 {
+		if section.Title == "" {
+			return errors.New("a section with a heading needs a title")
+		}
+		if strings.HasPrefix(section.Title, "#") {
+			return fmt.Errorf("title %q starts with '#': give the level as level, not in the title", section.Title)
+		}
+	} else {
+		if section.Body == "" {
+			return errors.New("a section with no heading needs a body")
+		}
+		if section.Title == "" {
+			section.Title = PromptSectionTitleFromHeading("")
+		}
+	}
+	section.Heading = ComposePromptSectionHeading(section.Level, section.Title)
 	// A body that itself contains a section-level heading would split into two
 	// sections the next time the rendered file is read back, and the drift
-	// check would then see a change nobody made.
-	if reparsed := SplitPromptMarkdown(RenderPromptMarkdown([]PromptMarkdownSection{{Heading: section.Heading, Body: section.Body}})); len(reparsed) != 1 {
+	// check would then see a change nobody made. The same check catches a
+	// title that does not survive the trip.
+	reparsed := SplitPromptMarkdown(RenderPromptMarkdown([]PromptMarkdownSection{{Heading: section.Heading, Body: section.Body}}))
+	if len(reparsed) != 1 {
 		return fmt.Errorf("body contains a level-1 or level-2 heading outside a code fence; it would read back as %d sections — make it a separate section or use a deeper heading", len(reparsed))
 	}
-	if section.Title == "" {
-		section.Title = PromptSectionTitleFromHeading(section.Heading)
+	if reparsed[0].Heading != section.Heading || reparsed[0].Body != section.Body {
+		return fmt.Errorf("section would not read back from a rendered file as written (heading %q came back as %q)", section.Heading, reparsed[0].Heading)
 	}
 	return nil
 }

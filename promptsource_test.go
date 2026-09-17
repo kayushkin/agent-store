@@ -393,3 +393,44 @@ func TestPerFileSectionsTableIsSetAsideNotDropped(t *testing.T) {
 		t.Fatalf("legacy rows = %d, new rows = %d; want 1 and 0", kept, fresh)
 	}
 }
+
+func TestLevelAndTitleDescribeASectionAndTheHeadingFollows(t *testing.T) {
+	f := newPromptFixture(t)
+	id := f.importHost()
+
+	group := &PromptSection{Level: 1, Title: "House rules", Enabled: true}
+	if _, err := f.store.CreatePromptSection(id, group, ""); err != nil {
+		t.Fatalf("a group with no text of its own was refused: %v", err)
+	}
+	if group.Heading != "# House rules" {
+		t.Fatalf("heading = %q, want it composed from level and title", group.Heading)
+	}
+	child := &PromptSection{Level: 2, Title: "Shoes off", Body: "At the door.", Enabled: true}
+	if _, err := f.store.CreatePromptSection(id, child, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	child.Title, child.Heading = "Shoes off indoors", ""
+	if _, err := f.store.UpdatePromptSection(child.ID, child, "clearer"); err != nil {
+		t.Fatal(err)
+	}
+	stored, _ := f.store.GetPromptSection(child.ID)
+	if stored.Heading != "## Shoes off indoors" || stored.Level != 2 || stored.Title != "Shoes off indoors" {
+		t.Fatalf("stored = level %d title %q heading %q", stored.Level, stored.Title, stored.Heading)
+	}
+	if !strings.Contains(f.read("CLAUDE.md"), "# House rules\n\n## Shoes off indoors\n\nAt the door.") {
+		t.Fatal("render does not carry the group and its section")
+	}
+
+	for name, bad := range map[string]*PromptSection{
+		"a level in the title":        {Level: 2, Title: "## Sneaky", Body: "x"},
+		"a heading with no title":     {Level: 1, Title: " "},
+		"no heading and no body":      {Level: 0, Title: "Preamble"},
+		"a level deeper than a split": {Level: 3, Title: "Deep", Body: "x"},
+		"a two-line title":            {Level: 2, Title: "a\nb", Body: "x"},
+	} {
+		if _, err := f.store.CreatePromptSection(id, bad, ""); err == nil {
+			t.Fatalf("accepted %s", name)
+		}
+	}
+}

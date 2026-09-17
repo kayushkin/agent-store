@@ -182,7 +182,7 @@ arrive differs.
 | Table | Holds |
 |-------|-------|
 | `prompt_collections` | One per place a prompt applies: `global` (rooted at `$HOME`) or `project` (rooted at a directory). |
-| `prompt_sections` | Heading, body, tags, position. Split at level-1 and level-2 headings, never inside a code fence. |
+| `prompt_sections` | Level, title, body, tags, position. Level 1 is a group, level 2 a section in the group above it, level 0 text with no heading. A write sends `level` and `title`; the store composes the markdown heading from them, and the API has no heading field to get wrong. A level-1 section with no body is a group that only holds sections. Files are split at level-1 and level-2 headings, never inside a code fence. |
 | `prompt_section_revisions` | Append-only. Every create, update and delete, with its source (`import`, `ui`, `drift`) and a note. Outlives the section. |
 | `prompt_collection_outputs` | The files a collection renders to, relative to its root, with `accounted_sha256`: the last disk content the sections are known to account for. |
 | `prompt_harness_deliveries` | Per harness id: `inject`, or `native_file` plus the file the harness reads itself. **No default** — an unknown harness is an error. |
@@ -202,8 +202,7 @@ so the collection's other files catch up. One that adds or removes a section is
 **held** until `POST /prompt-drifts/{id}/apply`; `…/dismiss` lets the next
 render overwrite the file instead. Section bodies in a drift are cut from the
 file by the splitter — no model writes them. A tagging agent may only annotate
-(`PUT /prompt-drifts/{id}/annotation`): tags and titles for added sections, and
-a note. Applying checks, inside the transaction, that every section of the
+(`PUT /prompt-drifts/{id}/annotation`): tags for added sections, and a note. Applying checks, inside the transaction, that every section of the
 edited file is then present in the collection in the file's order.
 
 `GET /context/resolve?harness=&work_dir=` returns what the bridge should

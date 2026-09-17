@@ -18,7 +18,7 @@ import (
 //
 // The section bodies in a drift's operations are cut out of the file by
 // SplitPromptMarkdown. No model writes or rewrites them. The tagging agent
-// only annotates: tags and titles for new sections, and a note.
+// only annotates: tags for new sections, and a note.
 
 const (
 	PromptDriftStatusOpen       = "open"       // seen, operations computed, not yet decided
@@ -39,12 +39,11 @@ type PromptDriftOperation struct {
 	BeforeSectionID int64    `json:"before_section_id,omitempty"` // insert at the top of the file: the section it precedes
 	Heading         string   `json:"heading,omitempty"`
 	Body            string   `json:"body,omitempty"`
-	Title           string   `json:"title,omitempty"`
 	Tags            []string `json:"tags,omitempty"`
 }
 
 // PromptDriftAnnotation is what the tagging agent (or the person approving)
-// adds to a drift. It cannot change a body or a heading. InsertedSections is
+// adds to a drift. It cannot change a body, a heading or a title. InsertedSections is
 // keyed by the operation's index in the drift's operations list.
 type PromptDriftAnnotation struct {
 	Note             string                            `json:"note,omitempty"`
@@ -52,9 +51,10 @@ type PromptDriftAnnotation struct {
 	AnnotatedBy      string                            `json:"annotated_by,omitempty"`
 }
 
+// A label carries tags only. The added section's title is its heading, which
+// the person who edited the file already wrote.
 type PromptDriftInsertedSectionLabel struct {
 	OperationIndex int      `json:"operation_index"`
-	Title          string   `json:"title,omitempty"`
 	Tags           []string `json:"tags"`
 }
 
@@ -454,7 +454,6 @@ func validatePromptDriftAnnotation(drift *PromptDrift, annotation *PromptDriftAn
 		}
 		seen[label.OperationIndex] = true
 		label.Tags = normalizeTags(label.Tags)
-		label.Title = strings.TrimSpace(label.Title)
 	}
 	return nil
 }
@@ -510,9 +509,6 @@ func (s *Store) ApplyPromptDrift(id int64, annotation *PromptDriftAnnotation) er
 				if err != nil {
 					return fmt.Errorf("operation %d: section %d: %w", index, operation.SectionID, err)
 				}
-				if section.Title == PromptSectionTitleFromHeading(section.Heading) {
-					section.Title = "" // the title followed the heading; let it keep following
-				}
 				section.Heading, section.Body = operation.Heading, operation.Body
 				if err := updatePromptSection(tx, section, ctx); err != nil {
 					return fmt.Errorf("operation %d: %w", index, err)
@@ -532,7 +528,7 @@ func (s *Store) ApplyPromptDrift(id int64, annotation *PromptDriftAnnotation) er
 				}
 				section := &PromptSection{CollectionID: drift.CollectionID, Heading: operation.Heading, Body: operation.Body, Position: position, Enabled: true, Tags: operation.Tags}
 				if label, ok := labels[index]; ok {
-					section.Title, section.Tags = label.Title, label.Tags
+					section.Tags = label.Tags
 				}
 				if err := insertPromptSection(tx, section, ctx); err != nil {
 					return fmt.Errorf("operation %d: %w", index, err)
