@@ -104,6 +104,9 @@ func (s *Store) migrate() error {
 	for _, m := range preMigrations {
 		s.db.Exec(m) // ignore errors when rename already happened, table never existed, or column already renamed
 	}
+	if err := s.setAsidePerFilePromptSections(); err != nil {
+		return fmt.Errorf("set aside per-file prompt sections: %w", err)
+	}
 	if _, err := s.db.Exec(schemaSQL); err != nil {
 		return err
 	}
@@ -111,11 +114,34 @@ func (s *Store) migrate() error {
 	postMigrations := []string{
 		"ALTER TABLE agent_harness ADD COLUMN is_default INTEGER DEFAULT 0",
 		"ALTER TABLE agent_harness ADD COLUMN subagent_allow TEXT",
+		"ALTER TABLE tracked_files ADD COLUMN ignored_by_rule_id INTEGER",
 	}
 	for _, m := range postMigrations {
 		s.db.Exec(m) // ignore "duplicate column" errors
 	}
 	return nil
+}
+
+// setAsidePerFilePromptSections moves the first prompt_sections table out of
+// the way before schemaSQL creates its replacement. That table tied every
+// section to a file through applies_to ('claude' | 'agents'); the replacement
+// names no file. The old rows are renamed, not dropped: they were imported by
+// a splitter that broke on code fences, so nothing reads them, but a rename
+// costs nothing and a drop cannot be undone.
+func (s *Store) setAsidePerFilePromptSections() error {
+	var hasAppliesTo int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('prompt_sections') WHERE name='applies_to'`).Scan(&hasAppliesTo)
+	if err != nil {
+		return err
+	}
+	if hasAppliesTo == 0 {
+		return nil
+	}
+	if _, err := s.db.Exec(`DROP INDEX IF EXISTS idx_prompt_sections_collection`); err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`ALTER TABLE prompt_sections RENAME TO prompt_sections_legacy_per_file`)
+	return err
 }
 
 func now() int64 { return time.Now().Unix() }

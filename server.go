@@ -2,6 +2,7 @@ package agentstore
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -61,12 +62,7 @@ func registerWithHandler(mux *http.ServeMux, h *handler) {
 	mux.HandleFunc("POST /files/{id}/enable", h.enableFile)
 	mux.HandleFunc("POST /files/{id}/disable", h.disableFile)
 	mux.HandleFunc("POST /files/scan", h.scanFiles)
-	mux.HandleFunc("GET /prompt-collections", h.listPromptCollections)
-	mux.HandleFunc("POST /prompt-collections", h.createPromptCollection)
-	mux.HandleFunc("POST /prompt-collections/{id}/sections", h.createPromptSection)
-	mux.HandleFunc("POST /prompt-collections/{id}/compile", h.compilePromptCollection)
-	mux.HandleFunc("PUT /prompt-sections/{id}", h.updatePromptSection)
-	mux.HandleFunc("DELETE /prompt-sections/{id}", h.deletePromptSection)
+	registerPromptSourceHandlers(mux, h)
 
 	// History (every UI save / drift / runner-detected change is a version row).
 	mux.HandleFunc("GET /files/{id}/versions", h.listFileVersions)
@@ -92,6 +88,23 @@ type handler struct {
 	// invocation, or a deployment without runners).
 	onFileSaved     func(*TrackedFile, *TrackedFileVersion)
 	onScanCompleted func(*ScanResult)
+	// onPromptDriftsDetected is invoked with the drifts a reconcile pass first
+	// saw, in their state after the pass. The bridge uses it to ask a tagging
+	// agent to label the sections a held drift would add.
+	onPromptDriftsDetected func([]PromptDrift)
+}
+
+// HandlerHooks are the callbacks an embedding server can hang on the routes.
+// Every field is optional.
+type HandlerHooks struct {
+	OnFileSaved            func(*TrackedFile, *TrackedFileVersion)
+	OnScanCompleted        func(*ScanResult)
+	OnPromptDriftsDetected func([]PromptDrift)
+}
+
+// RegisterHandlersWithHookSet is RegisterHandlers plus the embedding server's hooks.
+func RegisterHandlersWithHookSet(mux *http.ServeMux, s *Store, hooks HandlerHooks) {
+	registerWithHandler(mux, &handler{s: s, onFileSaved: hooks.OnFileSaved, onScanCompleted: hooks.OnScanCompleted, onPromptDriftsDetected: hooks.OnPromptDriftsDetected})
 }
 
 // RegisterHandlersWithHooks is RegisterHandlers plus seed-broadcast hooks.
@@ -405,7 +418,11 @@ func parseID(r *http.Request) (int64, error) {
 func (h *handler) listFiles(w http.ResponseWriter, r *http.Request) {
 	scope := r.URL.Query().Get("scope")
 	agentSlug := r.URL.Query().Get("agent_slug")
-	files, err := h.s.ListTrackedFiles(scope, agentSlug)
+	list := h.s.ListTrackedFiles
+	if r.URL.Query().Get("include_ignored") == "true" {
+		list = h.s.ListTrackedFilesIncludingIgnored
+	}
+	files, err := list(scope, agentSlug)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -509,7 +526,20 @@ func (h *handler) scanFiles(w http.ResponseWriter, r *http.Request) {
 	if h.onScanCompleted != nil {
 		h.onScanCompleted(res)
 	}
-	writeJSON(w, 200, res)
+	// A scan is when out-of-band edits are noticed, so it is also when edits
+	// to a rendered prompt file are carried back up to the sections.
+	reconciliation, err := h.s.ReconcilePromptDrifts()
+	if err != nil {
+		writeErr(w, 500, "scan finished, prompt drift reconcile failed: "+err.Error())
+		return
+	}
+	h.afterPromptDriftReconciliation(reconciliation)
+	writeJSON(w, 200, scanResponse{ScanResult: res, PromptDriftReconciliation: reconciliation})
+}
+
+type scanResponse struct {
+	*ScanResult
+	PromptDriftReconciliation *PromptDriftReconciliation `json:"prompt_drift_reconciliation"`
 }
 
 // === Context resolver ===
@@ -522,6 +552,10 @@ func (h *handler) resolveContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := h.s.ResolveContext(harness, workDir)
+	if errors.Is(err, ErrPromptHarnessDeliveryUnknown) {
+		writeErr(w, 404, err.Error())
+		return
+	}
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return

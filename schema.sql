@@ -250,6 +250,7 @@ CREATE TABLE IF NOT EXISTS tracked_files (
     mtime INTEGER,
     last_scanned_at INTEGER,
     status TEXT NOT NULL DEFAULT 'present', -- present, missing
+    ignored_by_rule_id INTEGER,             -- tracked_file_ignore_rules.id; NULL = not ignored
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
@@ -292,11 +293,14 @@ CREATE INDEX IF NOT EXISTS idx_tracked_file_versions_file ON tracked_file_versio
 CREATE INDEX IF NOT EXISTS idx_tracked_file_versions_sha ON tracked_file_versions(tracked_file_id, sha256);
 
 -- ============================================
--- STRUCTURED PROMPT SOURCES
+-- STRUCTURED PROMPT SOURCE
 -- ============================================
--- These rows are the editable source sections. The compiled CLAUDE.md and
--- AGENTS.md files stay in tracked_files / tracked_file_versions as the
--- materialized outputs the harnesses and runners consume.
+-- The prompt is stored as sections, and a section names no harness and no
+-- file: every harness receives the same sections. Which files a collection
+-- renders to is a separate fact (prompt_collection_outputs), and whether the
+-- bridge injects the prompt or leaves a harness to read its own file is
+-- another (prompt_harness_deliveries). The rendered files stay in
+-- tracked_files / tracked_file_versions.
 
 CREATE TABLE IF NOT EXISTS prompt_collections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -314,17 +318,101 @@ CREATE TABLE IF NOT EXISTS prompt_sections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     collection_id INTEGER NOT NULL,
     title TEXT NOT NULL,
-    heading TEXT,
+    heading TEXT NOT NULL DEFAULT '',      -- the markdown heading line, '' for a preamble
     body TEXT NOT NULL,
-    applies_to TEXT NOT NULL,              -- all, claude, agents
-    priority INTEGER NOT NULL DEFAULT 0,
+    tags TEXT NOT NULL DEFAULT '[]',       -- JSON array of strings
+    position INTEGER NOT NULL DEFAULT 0,   -- render order within the collection
     enabled INTEGER NOT NULL DEFAULT 1,
-    source_path TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     FOREIGN KEY (collection_id) REFERENCES prompt_collections(id) ON DELETE CASCADE
 );
-CREATE INDEX IF NOT EXISTS idx_prompt_sections_collection ON prompt_sections(collection_id, priority, id);
+CREATE INDEX IF NOT EXISTS idx_prompt_sections_collection_position ON prompt_sections(collection_id, position, id);
+
+-- Append-only. One row per write to a section, holding the state the write
+-- left behind (for a delete: the state it removed). No foreign key to
+-- prompt_sections, so the history of a deleted section survives it.
+CREATE TABLE IF NOT EXISTS prompt_section_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    section_id INTEGER NOT NULL,
+    collection_id INTEGER NOT NULL,
+    operation TEXT NOT NULL,               -- create, update, delete
+    title TEXT NOT NULL,
+    heading TEXT NOT NULL,
+    body TEXT NOT NULL,
+    tags TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    enabled INTEGER NOT NULL,
+    source TEXT NOT NULL,                  -- import, ui, drift
+    drift_id INTEGER,                      -- prompt_drifts.id when source = drift
+    note TEXT,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_prompt_section_revisions_section ON prompt_section_revisions(section_id, id);
+CREATE INDEX IF NOT EXISTS idx_prompt_section_revisions_collection ON prompt_section_revisions(collection_id, id);
+
+-- A file one collection renders to. accounted_sha256 is the hash of the
+-- last on-disk content the sections are known to account for: set when the
+-- file is imported, rendered, or a drift from it is applied. A disk hash that
+-- differs from it is drift, and a render refuses to write over drift.
+CREATE TABLE IF NOT EXISTS prompt_collection_outputs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    collection_id INTEGER NOT NULL,
+    relative_path TEXT NOT NULL,           -- relative to the collection's root_path
+    enabled INTEGER NOT NULL DEFAULT 1,
+    accounted_sha256 TEXT,
+    accounted_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (collection_id, relative_path),
+    FOREIGN KEY (collection_id) REFERENCES prompt_collections(id) ON DELETE CASCADE
+);
+
+-- How the bridge hands the prompt to one harness. 'inject' = the bridge puts
+-- the resolved prompt in the system prompt at spawn. 'native_file' = the
+-- harness reads a rendered file itself and the bridge must not inject, or the
+-- harness would get the prompt twice. harness is the id the bridge uses.
+CREATE TABLE IF NOT EXISTS prompt_harness_deliveries (
+    harness TEXT PRIMARY KEY,
+    delivery TEXT NOT NULL,                -- inject, native_file
+    native_relative_path TEXT,             -- native_file only: the file the harness reads, relative to a collection root
+    note TEXT,
+    updated_at INTEGER NOT NULL
+);
+
+-- An output file whose on-disk content no longer matches what the sections
+-- account for. disk_content is kept so the edit survives whatever happens to
+-- the file next.
+CREATE TABLE IF NOT EXISTS prompt_drifts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    collection_id INTEGER NOT NULL,
+    output_id INTEGER NOT NULL,
+    accounted_sha256 TEXT,                 -- what the sections accounted for when the drift was seen
+    disk_sha256 TEXT NOT NULL,
+    disk_content BLOB NOT NULL,
+    status TEXT NOT NULL,                  -- open, held, applied, dismissed, superseded
+    held_reason TEXT,
+    operations TEXT,                       -- JSON: the section operations that reproduce the disk content
+    annotation TEXT,                       -- JSON: what the tagging agent added (tags, titles, note)
+    created_at INTEGER NOT NULL,
+    resolved_at INTEGER,
+    UNIQUE (output_id, disk_sha256),
+    FOREIGN KEY (collection_id) REFERENCES prompt_collections(id) ON DELETE CASCADE,
+    FOREIGN KEY (output_id) REFERENCES prompt_collection_outputs(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_prompt_drifts_status ON prompt_drifts(status, id);
+
+-- Paths the scan finds but that are copies or third-party files, not prompts
+-- anyone here maintains. A matching row is stamped, never deleted.
+CREATE TABLE IF NOT EXISTS tracked_file_ignore_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,                    -- path_pattern, git_worktree
+    path_pattern TEXT NOT NULL DEFAULT '', -- path_pattern rules only: relative to $HOME, '*' matches any run of characters, '/' included
+    reason TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    UNIQUE (kind, path_pattern)
+);
 
 -- ============================================
 -- MACHINE SEED PROFILES (per-runner opt-in scopes)

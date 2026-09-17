@@ -23,8 +23,11 @@ type TrackedFile struct {
 	MTime         int64  `json:"mtime"`
 	LastScannedAt int64  `json:"last_scanned_at"`
 	Status        string `json:"status"` // present, missing
-	CreatedAt     int64  `json:"created_at"`
-	UpdatedAt     int64  `json:"updated_at"`
+	// IgnoredByRuleID is the tracked_file_ignore_rules row that says this file
+	// is a copy or third-party, 0 when none does. See trackedfileignore.go.
+	IgnoredByRuleID int64 `json:"ignored_by_rule_id,omitempty"`
+	CreatedAt       int64 `json:"created_at"`
+	UpdatedAt       int64 `json:"updated_at"`
 }
 
 // Well-known agent-config filenames (matched anywhere outside ~/.claude).
@@ -187,6 +190,7 @@ type ScanResult struct {
 	Updated   int         `json:"updated"`
 	Unchanged int         `json:"unchanged"`
 	Missing   int         `json:"missing"`
+	Ignored   int         `json:"ignored"` // of Scanned, how many an ignore rule claims
 	Errors    []ScanError `json:"errors"`
 }
 
@@ -257,6 +261,10 @@ func (s *Store) Scan() (*ScanResult, error) {
 
 	res := &ScanResult{}
 	seen := make(map[string]bool)
+	ignoreRules, err := s.ListTrackedFileIgnoreRules()
+	if err != nil {
+		return nil, fmt.Errorf("list ignore rules: %w", err)
+	}
 
 	visitFile := func(path string) {
 		scope, ok := classifyFile(path, home)
@@ -282,10 +290,19 @@ func (s *Store) Scan() (*ScanResult, error) {
 			res.fail(canon, scanStageUpsert, err)
 			return
 		}
+		ignoredByRuleID, err := s.stampTrackedFileIgnore(fileID, canon, home, ignoreRules)
+		if err != nil {
+			res.fail(canon, scanStageUpsert, err)
+			return
+		}
+		if ignoredByRuleID != 0 {
+			res.Ignored++
+		}
 		// History capture: if the on-disk hash isn't already in our version log
 		// for this file, ingest it as scan-import. Catches first-discovery and
-		// out-of-band edits between scans without losing anything.
-		if fileID > 0 {
+		// out-of-band edits between scans without losing anything. An ignored
+		// file gets no history: it is a copy, and its history is the original's.
+		if fileID > 0 && ignoredByRuleID == 0 {
 			existing, err := s.FindVersionByHash(fileID, hash)
 			if err == nil && existing == nil {
 				if data, err := os.ReadFile(path); err == nil {
@@ -416,10 +433,24 @@ func nullIfEmpty(s string) any {
 	return s
 }
 
-// ListTrackedFiles returns all rows, optionally filtered. Empty filters = all.
+// ListTrackedFiles returns the rows no ignore rule has claimed, optionally
+// filtered. Empty filters = all. It is what context resolution, runner seeding
+// and prompt import read, none of which want a worktree's copy of a file.
 func (s *Store) ListTrackedFiles(scope, agentSlug string) ([]TrackedFile, error) {
-	q := "SELECT id, path, scope, COALESCE(agent_slug,''), enabled, COALESCE(fs_hash,''), COALESCE(size,0), COALESCE(mtime,0), COALESCE(last_scanned_at,0), status, created_at, updated_at FROM tracked_files WHERE 1=1"
+	return s.listTrackedFiles(scope, agentSlug, false)
+}
+
+// ListTrackedFilesIncludingIgnored is ListTrackedFiles plus the ignored rows.
+func (s *Store) ListTrackedFilesIncludingIgnored(scope, agentSlug string) ([]TrackedFile, error) {
+	return s.listTrackedFiles(scope, agentSlug, true)
+}
+
+func (s *Store) listTrackedFiles(scope, agentSlug string, includeIgnored bool) ([]TrackedFile, error) {
+	q := "SELECT id, path, scope, COALESCE(agent_slug,''), enabled, COALESCE(fs_hash,''), COALESCE(size,0), COALESCE(mtime,0), COALESCE(last_scanned_at,0), status, COALESCE(ignored_by_rule_id,0), created_at, updated_at FROM tracked_files WHERE 1=1"
 	var args []any
+	if !includeIgnored {
+		q += " AND ignored_by_rule_id IS NULL"
+	}
 	if scope != "" {
 		q += " AND scope = ?"
 		args = append(args, scope)
@@ -438,7 +469,7 @@ func (s *Store) ListTrackedFiles(scope, agentSlug string) ([]TrackedFile, error)
 	for rows.Next() {
 		var f TrackedFile
 		var en int
-		if err := rows.Scan(&f.ID, &f.Path, &f.Scope, &f.AgentSlug, &en, &f.FSHash, &f.Size, &f.MTime, &f.LastScannedAt, &f.Status, &f.CreatedAt, &f.UpdatedAt); err != nil {
+		if err := rows.Scan(&f.ID, &f.Path, &f.Scope, &f.AgentSlug, &en, &f.FSHash, &f.Size, &f.MTime, &f.LastScannedAt, &f.Status, &f.IgnoredByRuleID, &f.CreatedAt, &f.UpdatedAt); err != nil {
 			return nil, err
 		}
 		f.Enabled = en == 1
@@ -451,8 +482,8 @@ func (s *Store) ListTrackedFiles(scope, agentSlug string) ([]TrackedFile, error)
 func (s *Store) GetTrackedFile(id int64) (*TrackedFile, error) {
 	var f TrackedFile
 	var en int
-	err := s.db.QueryRow("SELECT id, path, scope, COALESCE(agent_slug,''), enabled, COALESCE(fs_hash,''), COALESCE(size,0), COALESCE(mtime,0), COALESCE(last_scanned_at,0), status, created_at, updated_at FROM tracked_files WHERE id=?", id).
-		Scan(&f.ID, &f.Path, &f.Scope, &f.AgentSlug, &en, &f.FSHash, &f.Size, &f.MTime, &f.LastScannedAt, &f.Status, &f.CreatedAt, &f.UpdatedAt)
+	err := s.db.QueryRow("SELECT id, path, scope, COALESCE(agent_slug,''), enabled, COALESCE(fs_hash,''), COALESCE(size,0), COALESCE(mtime,0), COALESCE(last_scanned_at,0), status, COALESCE(ignored_by_rule_id,0), created_at, updated_at FROM tracked_files WHERE id=?", id).
+		Scan(&f.ID, &f.Path, &f.Scope, &f.AgentSlug, &en, &f.FSHash, &f.Size, &f.MTime, &f.LastScannedAt, &f.Status, &f.IgnoredByRuleID, &f.CreatedAt, &f.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}

@@ -172,3 +172,44 @@ go run ./cmd/migrate-inber
 ## Part of the llm-bridge ecosystem
 
 agent-store is one of several optional stores used by [llm-bridge-server](https://github.com/kayushkin/llm-bridge-server). See the [llm-bridge](https://github.com/kayushkin/llm-bridge) README for the full ecosystem.
+
+## The prompt source
+
+The host prompt lives in this database as **sections**, and a section names no
+harness and no file. Every harness gets the same sections; only the way they
+arrive differs.
+
+| Table | Holds |
+|-------|-------|
+| `prompt_collections` | One per place a prompt applies: `global` (rooted at `$HOME`) or `project` (rooted at a directory). |
+| `prompt_sections` | Heading, body, tags, position. Split at level-1 and level-2 headings, never inside a code fence. |
+| `prompt_section_revisions` | Append-only. Every create, update and delete, with its source (`import`, `ui`, `drift`) and a note. Outlives the section. |
+| `prompt_collection_outputs` | The files a collection renders to, relative to its root, with `accounted_sha256`: the last disk content the sections are known to account for. |
+| `prompt_harness_deliveries` | Per harness id: `inject`, or `native_file` plus the file the harness reads itself. **No default** — an unknown harness is an error. |
+| `prompt_drifts` | A rendered file that was edited on disk: the content, the section operations that reproduce it, and what became of it. |
+| `tracked_file_ignore_rules` | Copies and third-party files the scan finds but nobody maintains (git worktrees are detected, not pattern-matched). Ignored rows are stamped, never deleted. |
+
+**Render** (`POST /prompt-collections/{id}/render`, and after every section
+write) writes the same text to every enabled output. It answers **409** and
+writes nothing when any output was edited on disk since the sections last
+accounted for it.
+
+**Drift** is how such an edit travels back up. `POST /prompt-drifts/reconcile`
+(also run at the end of `POST /files/scan`) diffs the edited file against the
+content last accounted for and maps the difference onto sections. A drift that
+only edits existing sections is applied at once and the collection re-rendered,
+so the collection's other files catch up. One that adds or removes a section is
+**held** until `POST /prompt-drifts/{id}/apply`; `…/dismiss` lets the next
+render overwrite the file instead. Section bodies in a drift are cut from the
+file by the splitter — no model writes them. A tagging agent may only annotate
+(`PUT /prompt-drifts/{id}/annotation`): tags and titles for added sections, and
+a note. Applying checks, inside the transaction, that every section of the
+edited file is then present in the collection in the file's order.
+
+`GET /context/resolve?harness=&work_dir=` returns what the bridge should
+inject: the global collection, then each project collection whose root is
+`work_dir` or an ancestor. For a `native_file` harness, collections that render
+to its file are left out, since the harness reads those itself.
+
+`GET /prompt-delivery-options` serves the vocabularies (delivery kinds, prompt
+file names, drift statuses, ignore rule kinds).
