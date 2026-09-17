@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# One shared gate decides whether this tree may be deployed (main clone, default
+# branch, clean, pushed, not behind, and the same for every tree the build reads).
+# It lives in healthcheck/scripts/deploy-gate.sh. Do not inline or copy it.
+( cd "$(dirname "$0")" && "$HOME/bin/deploy-gate" check )
+
 # Mirrors skill-store/deploy.sh: builds the cmd/server binary, drops it
 # into ~/bin/agent-store, and bounces the user systemd unit. Same DBus
 # env shim so the script works from non-login shells (Claude, automation).
@@ -55,3 +60,6 @@ fi
 echo "    smoke test OK"
 
 echo "==> Done."
+
+# Last act: write this deploy to repo-store's ledger, so the next agent sees what is live.
+( cd "$(dirname "$0")" && "$HOME/bin/deploy-gate" record )
