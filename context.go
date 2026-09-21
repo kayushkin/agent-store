@@ -12,8 +12,11 @@ import (
 
 // Every harness gets the same prompt: the host collection's sections, then
 // the sections of each project collection whose root is the session's working
-// directory or an ancestor of it, outermost first. What differs per harness is
-// only how it arrives, and that is a row in prompt_harness_deliveries:
+// directory or an ancestor of it, outermost first, then the context sections
+// the session's context tags select (selectContextSections). A context
+// collection with no root applies in every directory, and one with a root
+// only under it. What differs per harness is only how the prompt arrives, and
+// that is a row in prompt_harness_deliveries:
 //
 //   - inject: the bridge puts the resolved prompt in the system prompt.
 //   - native_file: the harness reads one rendered file itself
@@ -136,50 +139,88 @@ type ResolvedContextEntry struct {
 	// ReadNativelyFrom is the file the harness reads this collection from when
 	// it was not injected.
 	ReadNativelyFrom string `json:"read_natively_from,omitempty"`
+	// MatchedSections and UnmatchedSections are set for a context collection
+	// only: which of its sections the context tags selected, and which they
+	// did not, each with the reason.
+	MatchedSections   []ResolvedContextSection `json:"matched_sections,omitempty"`
+	UnmatchedSections []ResolvedContextSection `json:"unmatched_sections,omitempty"`
+}
+
+// ResolvedContextSection is one section of a context collection and why it
+// was or was not injected.
+type ResolvedContextSection struct {
+	SectionID int64    `json:"section_id"`
+	Title     string   `json:"title"`
+	Tags      []string `json:"tags"`
+	// MissingTags are the section's tags the context tags did not carry.
+	MissingTags []string `json:"missing_tags,omitempty"`
+	Reason      string   `json:"reason"`
 }
 
 // ResolvedContext is what the bridge should put in a harness's system prompt.
 // Content may be empty: a native_file harness whose file every applicable
 // collection renders to needs nothing injected.
 type ResolvedContext struct {
-	Harness  string                 `json:"harness"`
-	WorkDir  string                 `json:"work_dir,omitempty"`
-	Delivery string                 `json:"delivery"`
-	Content  string                 `json:"content"`
-	Manifest []ResolvedContextEntry `json:"manifest"`
+	Harness  string `json:"harness"`
+	WorkDir  string `json:"work_dir,omitempty"`
+	Delivery string `json:"delivery"`
+	// ContextTags are the tags the caller matched context sections against:
+	// for a session, its card's tags.
+	ContextTags []string               `json:"context_tags"`
+	Content     string                 `json:"content"`
+	Manifest    []ResolvedContextEntry `json:"manifest"`
 }
 
 // ResolveContext assembles the prompt for one harness in one working
-// directory. See the comment at the top of this file for the rule.
-func (s *Store) ResolveContext(harness, workDir string) (*ResolvedContext, error) {
+// directory, with the context sections that contextTags select. See the
+// comment at the top of this file for the rule.
+func (s *Store) ResolveContext(harness, workDir string, contextTags []string) (*ResolvedContext, error) {
 	delivery, err := s.GetPromptHarnessDelivery(harness)
 	if err != nil {
 		return nil, err
 	}
-	out := &ResolvedContext{Harness: harness, WorkDir: workDir, Delivery: delivery.Delivery, Manifest: []ResolvedContextEntry{}}
+	if contextTags == nil {
+		contextTags = []string{}
+	}
+	out := &ResolvedContext{Harness: harness, WorkDir: workDir, Delivery: delivery.Delivery, ContextTags: contextTags, Manifest: []ResolvedContextEntry{}}
 	if workDir != "" {
 		workDir = filepath.Clean(workDir)
+	}
+	inWorkDir := func(root string) bool {
+		return workDir != "" && (workDir == root || strings.HasPrefix(workDir, root+string(os.PathSeparator)))
 	}
 
 	collections, err := s.ListPromptCollections()
 	if err != nil {
 		return nil, err
 	}
-	var applicable []PromptCollection
+	var applicable, applicableContext []PromptCollection
 	for _, c := range collections {
-		switch {
-		case c.Scope == promptCollectionScopeGlobal:
+		switch c.Scope {
+		case promptCollectionScopeGlobal:
 			applicable = append(applicable, c)
-		case workDir != "" && (workDir == c.RootPath || strings.HasPrefix(workDir, c.RootPath+string(os.PathSeparator))):
-			applicable = append(applicable, c)
+		case promptCollectionScopeProject:
+			if inWorkDir(c.RootPath) {
+				applicable = append(applicable, c)
+			}
+		case promptCollectionScopeContext:
+			if c.RootPath == "" || inWorkDir(c.RootPath) {
+				applicableContext = append(applicableContext, c)
+			}
+		default:
+			return nil, fmt.Errorf("prompt collection %d has unknown scope %q", c.ID, c.Scope)
 		}
 	}
-	sort.SliceStable(applicable, func(i, j int) bool {
-		if (applicable[i].Scope == promptCollectionScopeGlobal) != (applicable[j].Scope == promptCollectionScopeGlobal) {
-			return applicable[i].Scope == promptCollectionScopeGlobal
-		}
-		return len(applicable[i].RootPath) < len(applicable[j].RootPath)
-	})
+	outermostFirst := func(collections []PromptCollection) {
+		sort.SliceStable(collections, func(i, j int) bool {
+			if (collections[i].Scope == promptCollectionScopeGlobal) != (collections[j].Scope == promptCollectionScopeGlobal) {
+				return collections[i].Scope == promptCollectionScopeGlobal
+			}
+			return len(collections[i].RootPath) < len(collections[j].RootPath)
+		})
+	}
+	outermostFirst(applicable)
+	outermostFirst(applicableContext)
 
 	var parts []string
 	for _, c := range applicable {
@@ -207,6 +248,88 @@ func (s *Store) ResolveContext(harness, workDir string) (*ResolvedContext, error
 		out.Manifest = append(out.Manifest, entry)
 		parts = append(parts, rendered)
 	}
+
+	// A context collection renders to no file, so whatever it contributes is
+	// injected whatever the harness's delivery.
+	for _, c := range applicableContext {
+		sections, err := s.ListPromptSections(c.ID)
+		if err != nil {
+			return nil, err
+		}
+		selected, matched, unmatched := selectContextSections(sections, contextTags)
+		entry := ResolvedContextEntry{CollectionID: c.ID, Slug: c.Slug, Scope: c.Scope, RootPath: c.RootPath, MatchedSections: matched, UnmatchedSections: unmatched}
+		rendered := strings.TrimSpace(renderPromptSections(selected))
+		if rendered != "" {
+			entry.Bytes = len(rendered)
+			entry.Injected = true
+			parts = append(parts, rendered)
+		}
+		out.Manifest = append(out.Manifest, entry)
+	}
 	out.Content = strings.Join(parts, "\n\n")
 	return out, nil
+}
+
+// selectContextSections picks the sections of a context collection that
+// contextTags select: an enabled section is selected when every one of its
+// tags is among contextTags, compared exactly, as kanban-store matches a tag
+// rule against a card. A section with no tags is never selected — "every one
+// of no tags" would put it in every session, which is what the global
+// collection is for.
+//
+// A selected level-2 section is rendered under the heading of the level-1
+// group it sits in, so the injected text keeps its outline; the group's own
+// body goes with it only when the group is selected too.
+func selectContextSections(sections []PromptSection, contextTags []string) (selected []PromptSection, matched, unmatched []ResolvedContextSection) {
+	carried := make(map[string]bool, len(contextTags))
+	for _, tag := range contextTags {
+		carried[tag] = true
+	}
+	var group *PromptSection
+	groupEmitted := false
+	for i := range sections {
+		section := sections[i]
+		if section.Level == 1 {
+			group = &sections[i]
+			groupEmitted = false
+		}
+		report := ResolvedContextSection{SectionID: section.ID, Title: section.Title, Tags: section.Tags}
+		switch {
+		case !section.Enabled:
+			report.Reason = "disabled"
+			unmatched = append(unmatched, report)
+			continue
+		case len(section.Tags) == 0 && section.Level == 1 && strings.TrimSpace(section.Body) == "":
+			report.Reason = "a group heading with no text of its own; it goes in with any selected section under it"
+			unmatched = append(unmatched, report)
+			continue
+		case len(section.Tags) == 0:
+			report.Reason = "has no tags, so no card selects it"
+			unmatched = append(unmatched, report)
+			continue
+		}
+		for _, tag := range section.Tags {
+			if !carried[tag] {
+				report.MissingTags = append(report.MissingTags, tag)
+			}
+		}
+		if len(report.MissingTags) > 0 {
+			report.Reason = "the context tags lack " + strings.Join(report.MissingTags, ", ")
+			unmatched = append(unmatched, report)
+			continue
+		}
+		report.Reason = "every tag matched"
+		matched = append(matched, report)
+		if section.Level == 1 {
+			selected = append(selected, section)
+			groupEmitted = true
+			continue
+		}
+		if section.Level > 1 && group != nil && !groupEmitted {
+			selected = append(selected, PromptSection{Heading: group.Heading, Enabled: true})
+			groupEmitted = true
+		}
+		selected = append(selected, section)
+	}
+	return selected, matched, unmatched
 }

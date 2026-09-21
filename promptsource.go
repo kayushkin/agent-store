@@ -16,6 +16,11 @@ import (
 const (
 	promptCollectionScopeGlobal  = "global"
 	promptCollectionScopeProject = "project"
+	// promptCollectionScopeContext is a collection that renders to no file:
+	// its sections reach a session only when the session's context tags
+	// select them. Its root is "" for every directory, or the directory it
+	// is limited to.
+	promptCollectionScopeContext = "context"
 
 	PromptRevisionSourceImport = "import"
 	PromptRevisionSourceUI     = "ui"
@@ -41,6 +46,11 @@ var harnessConfigDirectoryNames = map[string]bool{
 func isPromptProseFileName(base string) bool {
 	return agentFileNames[base] && base != ".aider.conf.yml"
 }
+
+// ErrContextCollectionHasNoOutputs refuses a file output on a context
+// collection: its sections reach a session only by tag, and a rendered file
+// would hand them to every harness that reads it.
+var ErrContextCollectionHasNoOutputs = errors.New("a context collection renders to no file: its sections reach a session only through its card's tags")
 
 type PromptCollection struct {
 	ID          int64  `json:"id"`
@@ -242,10 +252,22 @@ func (s *Store) GetPromptCollectionView(collectionID int64) (*PromptCollectionVi
 // EnsurePromptCollection returns the collection for (scope, root), creating it
 // when there is none.
 func (s *Store) EnsurePromptCollection(scope, rootPath, title, description string) (*PromptCollection, error) {
-	if scope != promptCollectionScopeGlobal && scope != promptCollectionScopeProject {
-		return nil, fmt.Errorf("scope must be %q or %q", promptCollectionScopeGlobal, promptCollectionScopeProject)
+	switch scope {
+	case promptCollectionScopeGlobal, promptCollectionScopeProject:
+		if rootPath == "" || !filepath.IsAbs(rootPath) {
+			return nil, fmt.Errorf("a %s collection needs an absolute root_path", scope)
+		}
+		rootPath = filepath.Clean(rootPath)
+	case promptCollectionScopeContext:
+		if rootPath != "" && !filepath.IsAbs(rootPath) {
+			return nil, fmt.Errorf("a context collection's root_path is empty, for every directory, or absolute")
+		}
+		if rootPath != "" {
+			rootPath = filepath.Clean(rootPath)
+		}
+	default:
+		return nil, fmt.Errorf("scope must be %q, %q or %q", promptCollectionScopeGlobal, promptCollectionScopeProject, promptCollectionScopeContext)
 	}
-	rootPath = filepath.Clean(rootPath)
 	var id int64
 	err := s.db.QueryRow(`SELECT id FROM prompt_collections WHERE scope=? AND root_path=?`, scope, rootPath).Scan(&id)
 	if err == nil {
@@ -253,6 +275,9 @@ func (s *Store) EnsurePromptCollection(scope, rootPath, title, description strin
 	}
 	if err != sql.ErrNoRows {
 		return nil, err
+	}
+	if title == "" && rootPath == "" {
+		title = "Context for every directory"
 	}
 	if title == "" {
 		title = filepath.Base(rootPath)
@@ -276,10 +301,15 @@ func (s *Store) EnsurePromptCollection(scope, rootPath, title, description strin
 }
 
 func (s *Store) unusedPromptCollectionSlug(scope, rootPath string) (string, error) {
-	base := "main"
-	if scope != promptCollectionScopeGlobal {
-		replacer := strings.NewReplacer(" ", "-", "_", "-", ".", "-")
-		base = "project-" + strings.Trim(replacer.Replace(strings.ToLower(filepath.Base(rootPath))), "-")
+	replacer := strings.NewReplacer(" ", "-", "_", "-", ".", "-")
+	var base string
+	switch {
+	case scope == promptCollectionScopeGlobal:
+		base = "main"
+	case scope == promptCollectionScopeContext && rootPath == "":
+		base = "context"
+	default:
+		base = scope + "-" + strings.Trim(replacer.Replace(strings.ToLower(filepath.Base(rootPath))), "-")
 	}
 	slug := base
 	for attempt := 2; ; attempt++ {
@@ -615,6 +645,13 @@ func (s *Store) AddPromptCollectionOutput(collectionID int64, relativePath strin
 	relativePath, err := validatePromptOutputRelativePath(relativePath)
 	if err != nil {
 		return nil, err
+	}
+	collection, err := s.getPromptCollection(collectionID)
+	if err != nil {
+		return nil, err
+	}
+	if collection.Scope == promptCollectionScopeContext {
+		return nil, ErrContextCollectionHasNoOutputs
 	}
 	ts := now()
 	if _, err := s.db.Exec(`

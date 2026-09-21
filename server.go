@@ -551,7 +551,8 @@ func (h *handler) resolveContext(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "harness query param required")
 		return
 	}
-	res, err := h.s.ResolveContext(harness, workDir)
+	// Each tag parameter is one context tag, as a card's tags would be.
+	res, err := h.s.ResolveContext(harness, workDir, r.URL.Query()["tag"])
 	if errors.Is(err, ErrPromptHarnessDeliveryUnknown) {
 		writeErr(w, 404, err.Error())
 		return

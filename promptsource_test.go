@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -282,7 +283,7 @@ func TestResolveContextDeliversOncePerHarness(t *testing.T) {
 	}
 	workDir := filepath.Join(f.home, "repos", "logstack", "cmd")
 
-	if _, err := f.store.ResolveContext("claude_code", workDir); !errors.Is(err, ErrPromptHarnessDeliveryUnknown) {
+	if _, err := f.store.ResolveContext("claude_code", workDir, nil); !errors.Is(err, ErrPromptHarnessDeliveryUnknown) {
 		t.Fatalf("unknown harness: err = %v, want ErrPromptHarnessDeliveryUnknown", err)
 	}
 	if _, err := f.store.SetPromptHarnessDelivery(PromptHarnessDelivery{Harness: "codex", Delivery: PromptDeliveryInject}); err != nil {
@@ -292,7 +293,7 @@ func TestResolveContextDeliversOncePerHarness(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	injected, err := f.store.ResolveContext("codex", workDir)
+	injected, err := f.store.ResolveContext("codex", workDir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +306,7 @@ func TestResolveContextDeliversOncePerHarness(t *testing.T) {
 		t.Fatal("project sections came before host sections")
 	}
 
-	native, err := f.store.ResolveContext("claude_code", workDir)
+	native, err := f.store.ResolveContext("claude_code", workDir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +317,7 @@ func TestResolveContextDeliversOncePerHarness(t *testing.T) {
 		t.Fatal("logstack renders to no CLAUDE.md, so its sections had to be injected and were not")
 	}
 
-	elsewhere, _ := f.store.ResolveContext("codex", filepath.Join(f.home, "repos", "other"))
+	elsewhere, _ := f.store.ResolveContext("codex", filepath.Join(f.home, "repos", "other"), nil)
 	if strings.Contains(elsewhere.Content, "Go service.") {
 		t.Fatal("a project's sections reached a session outside its root")
 	}
@@ -446,5 +447,99 @@ func TestLevelAndTitleDescribeASectionAndTheHeadingFollows(t *testing.T) {
 		if _, err := f.store.CreatePromptSection(id, bad, 0, ""); err == nil {
 			t.Fatalf("accepted %s", name)
 		}
+	}
+}
+
+func TestContextSectionsReachASessionOnlyWhenTheCardCarriesEveryTag(t *testing.T) {
+	f := newPromptFixture(t)
+	f.importHost()
+	if _, err := f.store.SetPromptHarnessDelivery(PromptHarnessDelivery{Harness: "claude_code", Delivery: PromptDeliveryNativeFile, NativeRelativePath: "CLAUDE.md"}); err != nil {
+		t.Fatal(err)
+	}
+	everywhere, err := f.store.EnsurePromptCollection("context", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	northwind := filepath.Join(f.home, "repos", "northwind-api")
+	onlyNorthwind, err := f.store.EnsurePromptCollection("context", northwind, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if everywhere.Slug != "context" || onlyNorthwind.Slug != "context-northwind-api" {
+		t.Fatalf("slugs = %q, %q", everywhere.Slug, onlyNorthwind.Slug)
+	}
+	create := func(collectionID int64, heading, body string, tags ...string) {
+		t.Helper()
+		if _, err := f.store.CreatePromptSection(collectionID, &PromptSection{Heading: heading, Body: body, Tags: tags, Enabled: true}, 0, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	create(everywhere.ID, "# Payments", "")
+	create(everywhere.ID, "## Refunds", "Refunds go through the ledger.", "billing")
+	create(everywhere.ID, "## Chargebacks", "Chargebacks need a human.", "billing", "disputes")
+	create(everywhere.ID, "## Untagged", "Nobody should see this.")
+	create(onlyNorthwind.ID, "## Northwind billing", "Northwind bills monthly.", "billing")
+
+	resolve := func(workDir string, tags ...string) *ResolvedContext {
+		t.Helper()
+		resolved, err := f.store.ResolveContext("claude_code", workDir, tags)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resolved
+	}
+
+	billing := resolve(filepath.Join(northwind, "cmd"), "billing")
+	for _, want := range []string{"# Payments", "Refunds go through the ledger.", "Northwind bills monthly."} {
+		if !strings.Contains(billing.Content, want) {
+			t.Fatalf("a billing card in northwind-api is missing %q:\n%s", want, billing.Content)
+		}
+	}
+	for _, unwanted := range []string{"Chargebacks need a human.", "Nobody should see this.", "Be plain."} {
+		if strings.Contains(billing.Content, unwanted) {
+			t.Fatalf("a billing card in northwind-api got %q:\n%s", unwanted, billing.Content)
+		}
+	}
+	if strings.Index(billing.Content, "# Payments") > strings.Index(billing.Content, "Refunds go through") {
+		t.Fatal("a selected section came before the heading of its group")
+	}
+
+	disputes := resolve(filepath.Join(f.home, "repos", "other"), "billing", "disputes")
+	if !strings.Contains(disputes.Content, "Chargebacks need a human.") {
+		t.Fatal("a card carrying both tags did not get the section that needs both")
+	}
+	if strings.Contains(disputes.Content, "Northwind bills monthly.") {
+		t.Fatal("a context collection rooted at northwind-api reached a session outside it")
+	}
+
+	none := resolve(northwind)
+	if none.Content != "" {
+		t.Fatalf("a session with no card tags got context:\n%s", none.Content)
+	}
+	var reasons []string
+	for _, entry := range none.Manifest {
+		for _, section := range entry.UnmatchedSections {
+			reasons = append(reasons, section.Title+": "+section.Reason)
+		}
+	}
+	if !slices.Contains(reasons, "Untagged: has no tags, so no card selects it") || !slices.Contains(reasons, "Chargebacks: the context tags lack billing, disputes") {
+		t.Fatalf("the manifest does not say why sections were left out: %q", reasons)
+	}
+}
+
+func TestAContextCollectionRendersToNoFile(t *testing.T) {
+	f := newPromptFixture(t)
+	collection, err := f.store.EnsurePromptCollection("context", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.AddPromptCollectionOutput(collection.ID, "CLAUDE.md"); !errors.Is(err, ErrContextCollectionHasNoOutputs) {
+		t.Fatalf("err = %v, want ErrContextCollectionHasNoOutputs", err)
+	}
+	if _, err := f.store.EnsurePromptCollection("context", "repos/relative", "", ""); err == nil {
+		t.Fatal("accepted a relative root")
+	}
+	if _, err := f.store.EnsurePromptCollection("project", "", "", ""); err == nil {
+		t.Fatal("accepted a project collection with no root")
 	}
 }

@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -88,11 +87,7 @@ func (h *handler) createPromptCollection(w http.ResponseWriter, r *http.Request)
 		writeErr(w, 400, err.Error())
 		return
 	}
-	if strings.TrimSpace(body.RootPath) == "" || !filepath.IsAbs(body.RootPath) {
-		writeErr(w, 400, "root_path is required and must be absolute")
-		return
-	}
-	c, err := h.s.EnsurePromptCollection(body.Scope, body.RootPath, strings.TrimSpace(body.Title), strings.TrimSpace(body.Description))
+	c, err := h.s.EnsurePromptCollection(body.Scope, strings.TrimSpace(body.RootPath), strings.TrimSpace(body.Title), strings.TrimSpace(body.Description))
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
