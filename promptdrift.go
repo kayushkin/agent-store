@@ -21,11 +21,12 @@ import (
 // only annotates: tags for new sections, and a note.
 
 const (
-	PromptDriftStatusOpen       = "open"       // seen, operations computed, not yet decided
-	PromptDriftStatusHeld       = "held"       // needs a person: adds or removes sections, or could not be mapped
-	PromptDriftStatusApplied    = "applied"    // the sections now account for the file
-	PromptDriftStatusDismissed  = "dismissed"  // the edit is not wanted; the next render overwrites the file
-	PromptDriftStatusSuperseded = "superseded" // the file changed again before this was settled
+	PromptDriftStatusOpen             = "open"              // seen, operations computed, not yet decided
+	PromptDriftStatusHeld             = "held"              // needs a person: adds or removes sections, or could not be mapped
+	PromptDriftStatusApplied          = "applied"           // the sections now account for the file
+	PromptDriftStatusDismissed        = "dismissed"         // the edit is not wanted; the next render overwrites the file
+	PromptDriftStatusSuperseded       = "superseded"        // the file changed again before this was settled
+	PromptDriftStatusAlreadyAccounted = "already_accounted" // the sections came to render this content by another path, so there was nothing to apply
 
 	PromptDriftHeldReasonStructural = "adds or removes sections; approve it to apply"
 )
@@ -245,6 +246,19 @@ func (s *Store) DetectPromptDrifts(collectionID int64) ([]PromptDrift, error) {
 		if diskSHA == c.accountedSHA {
 			continue
 		}
+		// Render now, not once before the loop: a drift applied earlier in
+		// this pass may have just brought the sections to this file's
+		// content, as when one edit lands in both AGENTS.md and CLAUDE.md.
+		renderedSHA, err := s.renderedPromptCollectionSHA(c.collectionID)
+		if err != nil {
+			return detected, err
+		}
+		if diskSHA == renderedSHA {
+			if err := s.settleOutputTheSectionsAlreadyRender(c.outputID, renderedSHA); err != nil {
+				return detected, err
+			}
+			continue
+		}
 		var knownID int64
 		var knownStatus string
 		err = s.db.QueryRow(`SELECT id, status FROM prompt_drifts WHERE output_id=? AND disk_sha256=?`, c.outputID, diskSHA).Scan(&knownID, &knownStatus)
@@ -318,6 +332,29 @@ func promptDriftOperationsAreEditsOnly(operations []PromptDriftOperation) bool {
 		}
 	}
 	return true
+}
+
+func (s *Store) renderedPromptCollectionSHA(collectionID int64) (string, error) {
+	sections, err := s.ListPromptSections(collectionID)
+	if err != nil {
+		return "", err
+	}
+	return sha256Hex([]byte(renderPromptSections(sections))), nil
+}
+
+// settleOutputTheSectionsAlreadyRender records that an output's file holds
+// exactly what the sections render now. The file is accounted for at that
+// content, and any open or held drift describing that same content is
+// settled, since nothing in it is left to apply.
+func (s *Store) settleOutputTheSectionsAlreadyRender(outputID int64, renderedSHA string) error {
+	return s.inPromptTransaction(func(tx *sql.Tx) error {
+		if err := s.markPromptOutputAccounted(tx, outputID, renderedSHA); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`UPDATE prompt_drifts SET status=?, held_reason=NULL, resolved_at=? WHERE output_id=? AND disk_sha256=? AND status IN (?, ?)`,
+			PromptDriftStatusAlreadyAccounted, now(), outputID, renderedSHA, PromptDriftStatusOpen, PromptDriftStatusHeld)
+		return err
+	})
 }
 
 func (s *Store) holdPromptDrift(id int64, reason string) error {

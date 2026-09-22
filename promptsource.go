@@ -119,7 +119,7 @@ type PromptCollectionOutput struct {
 	// Live state, computed on read.
 	ExistsOnDisk  bool   `json:"exists_on_disk"`
 	DiskSHA256    string `json:"disk_sha256,omitempty"`
-	Drifted       bool   `json:"drifted"`        // disk differs from what the sections account for
+	Drifted       bool   `json:"drifted"`        // disk holds content the sections do not account for: neither the accounted content nor the current render
 	MatchesRender bool   `json:"matches_render"` // disk is exactly the current render
 	TrackedFileID int64  `json:"tracked_file_id,omitempty"`
 }
@@ -705,7 +705,7 @@ func (s *Store) listPromptCollectionOutputs(c PromptCollection, rendered string)
 			out[i].ExistsOnDisk = true
 			out[i].DiskSHA256 = sha256Hex(data)
 			out[i].MatchesRender = out[i].DiskSHA256 == renderedSHA
-			out[i].Drifted = out[i].DiskSHA256 != out[i].AccountedSHA256
+			out[i].Drifted = out[i].DiskSHA256 != out[i].AccountedSHA256 && !out[i].MatchesRender
 		case !os.IsNotExist(err):
 			return nil, fmt.Errorf("read %s: %w", out[i].Path, err)
 		}
@@ -780,7 +780,7 @@ func (s *Store) RenderPromptCollection(collectionID int64) (*PromptRenderResult,
 		}
 		if output.MatchesRender {
 			if output.AccountedSHA256 != renderedSHA {
-				if err := s.markPromptOutputAccounted(s.db, output.ID, renderedSHA); err != nil {
+				if err := s.settleOutputTheSectionsAlreadyRender(output.ID, renderedSHA); err != nil {
 					return nil, err
 				}
 			}

@@ -543,3 +543,144 @@ func TestAContextCollectionRendersToNoFile(t *testing.T) {
 		t.Fatal("accepted a project collection with no root")
 	}
 }
+
+// A harness that edits a repo's prompt usually writes the same text to both
+// AGENTS.md and CLAUDE.md. The first file's drift applies; by then the
+// sections render exactly what the second file holds, so the second is
+// accounted for and nothing is left for a person to settle.
+func TestTheSameEditInBothFilesIsAppliedOnceAndLeavesNothingHeld(t *testing.T) {
+	f := newPromptFixture(t)
+	id := f.importHost()
+	f.render(id)
+
+	edited := strings.Replace(f.read("AGENTS.md"), "Use the stores.", "Use the stores, always.", 1)
+	f.write("AGENTS.md", edited)
+	f.write("CLAUDE.md", edited)
+	reconciliation, err := f.store.ReconcilePromptDrifts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reconciliation.Detected) != 1 || reconciliation.Detected[0].Status != PromptDriftStatusApplied {
+		t.Fatalf("detected = %+v, want the one edit applied once", reconciliation.Detected)
+	}
+	if len(reconciliation.Refused) != 0 {
+		t.Fatalf("the render after applying was refused: %v", reconciliation.Refused)
+	}
+
+	view, err := f.store.GetPromptCollectionView(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.OpenDrifts) != 0 {
+		t.Fatalf("open or held drifts = %+v, want none", view.OpenDrifts)
+	}
+	for _, output := range view.Outputs {
+		if output.Drifted || output.AccountedSHA256 != output.DiskSHA256 {
+			t.Fatalf("%s: drifted=%v accounted=%s disk=%s, want accounted for", output.RelativePath, output.Drifted, output.AccountedSHA256, output.DiskSHA256)
+		}
+	}
+	if result := f.render(id); result.RefusedReason != "" || len(result.WrittenFiles) != 0 {
+		t.Fatalf("render = refused %q, wrote %d; want nothing to do", result.RefusedReason, len(result.WrittenFiles))
+	}
+	revisions, _ := f.store.ListPromptSectionRevisions(id, 0, 0)
+	fromDrift := 0
+	for _, revision := range revisions {
+		if revision.Source == PromptRevisionSourceDrift {
+			fromDrift++
+		}
+	}
+	if fromDrift != 1 {
+		t.Fatalf("revisions from drift = %d, want 1", fromDrift)
+	}
+}
+
+// Before the fix above, the second file's drift was held with no operations,
+// and the render that would have caught the file up was refused because of
+// that very drift, so it stayed held forever. The next scan settles a drift
+// like that on its own.
+func TestAHeldDriftForContentTheSectionsAlreadyRenderIsSettledByTheNextScan(t *testing.T) {
+	f := newPromptFixture(t)
+	id := f.importHost()
+	f.render(id)
+	staleSHA := sha256Hex([]byte(f.read("CLAUDE.md")))
+
+	f.write("AGENTS.md", strings.Replace(f.read("AGENTS.md"), "Use the stores.", "Use the stores, always.", 1))
+	if _, err := f.store.ReconcilePromptDrifts(); err != nil {
+		t.Fatal(err)
+	}
+	// Put CLAUDE.md back in the state the old scan left it in: the edit on
+	// disk, the baseline from before it, and a held drift with no operations.
+	view, _ := f.store.GetPromptCollectionView(id)
+	var claude PromptCollectionOutput
+	for _, output := range view.Outputs {
+		if output.RelativePath == "CLAUDE.md" {
+			claude = output
+		}
+	}
+	if !claude.MatchesRender {
+		t.Fatal("setup: CLAUDE.md should already hold the render")
+	}
+	if _, err := f.store.db.Exec(`UPDATE prompt_collection_outputs SET accounted_sha256=? WHERE id=?`, staleSHA, claude.ID); err != nil {
+		t.Fatal(err)
+	}
+	res, err := f.store.db.Exec(`INSERT INTO prompt_drifts (collection_id, output_id, accounted_sha256, disk_sha256, disk_content, status, held_reason, operations, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?)`, id, claude.ID, staleSHA, claude.DiskSHA256, []byte(f.read("CLAUDE.md")), PromptDriftStatusHeld,
+		`the section "## Services" this edit touches has itself changed in the sections since the file was last accounted for`, now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stuckID, _ := res.LastInsertId()
+
+	reconciliation, err := f.store.ReconcilePromptDrifts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reconciliation.Detected) != 0 {
+		t.Fatalf("detected = %+v, want nothing new", reconciliation.Detected)
+	}
+	stuck, err := f.store.GetPromptDrift(stuckID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stuck.Status != PromptDriftStatusAlreadyAccounted || stuck.HeldReason != "" {
+		t.Fatalf("stuck drift = status %q reason %q, want %q and no reason", stuck.Status, stuck.HeldReason, PromptDriftStatusAlreadyAccounted)
+	}
+	view, _ = f.store.GetPromptCollectionView(id)
+	if len(view.OpenDrifts) != 0 {
+		t.Fatalf("open or held drifts = %+v, want none", view.OpenDrifts)
+	}
+	for _, output := range view.Outputs {
+		if output.AccountedSHA256 != output.DiskSHA256 {
+			t.Fatalf("%s is still not accounted for", output.RelativePath)
+		}
+	}
+}
+
+// Two files carrying different edits to one section are a real conflict:
+// the second must still wait for a person, and its text must survive.
+func TestDifferentEditsToOneSectionInTwoFilesStillHoldTheSecond(t *testing.T) {
+	f := newPromptFixture(t)
+	id := f.importHost()
+	f.render(id)
+
+	rendered := f.read("AGENTS.md")
+	f.write("AGENTS.md", strings.Replace(rendered, "Use the stores.", "Use the stores, always.", 1))
+	f.write("CLAUDE.md", strings.Replace(rendered, "Use the stores.", "Use the stores, never.", 1))
+	reconciliation, err := f.store.ReconcilePromptDrifts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses := map[string]string{}
+	for _, drift := range reconciliation.Detected {
+		statuses[filepath.Base(drift.Path)] = drift.Status
+	}
+	if statuses["AGENTS.md"] != PromptDriftStatusApplied || statuses["CLAUDE.md"] != PromptDriftStatusHeld {
+		t.Fatalf("statuses = %v, want AGENTS.md applied and CLAUDE.md held", statuses)
+	}
+	if len(reconciliation.Refused) == 0 {
+		t.Fatal("the render wrote over a file holding a conflicting edit")
+	}
+	if !strings.Contains(f.read("CLAUDE.md"), "Use the stores, never.") {
+		t.Fatal("the conflicting edit was overwritten")
+	}
+}

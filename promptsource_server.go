@@ -3,6 +3,7 @@ package agentstore
 import (
 	"database/sql"
 	"errors"
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -342,6 +343,11 @@ func (h *handler) reconcilePromptDrifts(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *handler) afterPromptDriftReconciliation(reconciliation *PromptDriftReconciliation) {
+	// A refused render leaves a collection's other files behind the sections
+	// until someone settles the drift that blocked it; say so where it shows.
+	for _, reason := range reconciliation.Refused {
+		log.Printf("prompt drift reconcile: %s", reason)
+	}
 	if h.onPromptDriftsDetected != nil && len(reconciliation.Detected) > 0 {
 		h.onPromptDriftsDetected(reconciliation.Detected)
 	}
@@ -492,7 +498,7 @@ func (h *handler) listPromptDeliveryOptions(w http.ResponseWriter, r *http.Reque
 		"deliveries":                     []string{PromptDeliveryInject, PromptDeliveryNativeFile},
 		"prompt_file_names":              fileNames,
 		"harness_config_directory_names": directories,
-		"drift_statuses":                 []string{PromptDriftStatusOpen, PromptDriftStatusHeld, PromptDriftStatusApplied, PromptDriftStatusDismissed, PromptDriftStatusSuperseded},
+		"drift_statuses":                 []string{PromptDriftStatusOpen, PromptDriftStatusHeld, PromptDriftStatusApplied, PromptDriftStatusDismissed, PromptDriftStatusSuperseded, PromptDriftStatusAlreadyAccounted},
 		"tracked_file_ignore_rule_kinds": []string{TrackedFileIgnoreKindPathPattern, TrackedFileIgnoreKindGitWorktree},
 		"deepest_section_heading_level":  promptSectionDeepestHeadingLevel,
 	})

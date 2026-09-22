@@ -390,7 +390,7 @@ CREATE TABLE IF NOT EXISTS prompt_drifts (
     accounted_sha256 TEXT,                 -- what the sections accounted for when the drift was seen
     disk_sha256 TEXT NOT NULL,
     disk_content BLOB NOT NULL,
-    status TEXT NOT NULL,                  -- open, held, applied, dismissed, superseded
+    status TEXT NOT NULL,                  -- open, held, applied, dismissed, superseded, already_accounted
     held_reason TEXT,
     operations TEXT,                       -- JSON: the section operations that reproduce the disk content
     annotation TEXT,                       -- JSON: what the tagging agent added (tags, titles, note)
