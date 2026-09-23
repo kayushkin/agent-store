@@ -2,7 +2,7 @@
 
 This doc has been consolidated into the cross-cutting design set in `llm-bridge-server`.
 
-See: **`~/repos/llm-bridge-server/AGENT-MANAGEMENT.md`**
+See: **`~/repos/llm-bridge-server/docs/AGENT-MANAGEMENT.md`**
 
 That doc covers:
 - Canonical agent shape (post `orchestrator → harness` rename)

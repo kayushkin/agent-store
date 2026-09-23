@@ -28,7 +28,7 @@ CREATE INDEX IF NOT EXISTS idx_agents_parent ON agents(parent_agent_id);
 -- HARNESS (registry of agent runtimes — CC, Codex, inber, etc.)
 -- ============================================
 -- Pre-2026-05-11 name: "orchestrators". Renamed to align with the harness-layer
--- design in ~/repos/llm-bridge-server/HARNESS-LAYER.md.
+-- design in ~/repos/llm-bridge-server/docs/HARNESS-LAYER.md.
 
 CREATE TABLE IF NOT EXISTS harness (
     id TEXT PRIMARY KEY,                  -- "claudecode", "codex", "inber", "openclaw", "dash"
@@ -93,7 +93,7 @@ CREATE TABLE IF NOT EXISTS agent_harness_tools (
 -- ============================================
 -- Parallel to agent_harness_tools. Skill enrollment is harness-agnostic at the
 -- canonical level; per-harness rendering is in the render library (see
--- ~/repos/llm-bridge-server/TOOL-ROUTING.md skills section).
+-- ~/repos/llm-bridge-server/docs/TOOL-ROUTING.md skills section).
 
 CREATE TABLE IF NOT EXISTS agent_skills (
     agent_id INTEGER NOT NULL,
