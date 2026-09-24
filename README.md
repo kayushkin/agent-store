@@ -104,7 +104,8 @@ When used with [llm-bridge-server](https://github.com/kayushkin/llm-bridge-serve
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/reconcile` | Check for missing registrations and file drift |
-| `GET` | `/agents/health` | Health check |
+| `GET` | `/health` | Health check (standalone server only; hosts that embed the library serve their own) |
+| `GET` | `/settings` | The standalone server's environment variables, their values and where each came from (standalone server only; declared in `internal/config/settings.go`) |
 
 ## Schema
 

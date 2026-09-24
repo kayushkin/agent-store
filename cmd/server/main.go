@@ -1,24 +1,27 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net/http"
-	"os"
-	"strconv"
 	"time"
 
 	agentstore "github.com/kayushkin/agent-store"
+	"github.com/kayushkin/agent-store/internal/config"
+	"github.com/kayushkin/llm-bridge/servicesettings"
 )
 
 func main() {
-	addr := os.Getenv("AGENT_STORE_ADDR")
-	if addr == "" {
-		addr = ":8300"
+	settings, err := config.NewServerSettingsRegistry(servicesettings.ProcessEnvironment())
+	if err != nil {
+		log.Fatal(err)
 	}
-	dbPath := os.Getenv("AGENT_STORE_DB")
-	if dbPath == "" {
-		dbPath = agentstore.DefaultPath()
+	scanInterval, err := autoScanInterval(settings)
+	if err != nil {
+		log.Fatal(err)
 	}
+	addr := settings.String(config.SettingListenAddress)
+	dbPath := settings.String(config.SettingDatabasePath)
 
 	store, err := agentstore.Open(dbPath)
 	if err != nil {
@@ -31,8 +34,10 @@ func main() {
 	// This process owns its mux, so it serves its own /health. Hosts that
 	// embed agent-store must not -- see RegisterHealthHandler.
 	agentstore.RegisterHealthHandler(mux)
+	// Every route here is open, so this one is too; nothing it describes is
+	// Editable, so PUT is not mounted.
+	mux.Handle("GET /settings", servicesettings.Handler(settings, "/settings"))
 
-	scanInterval := parseScanInterval()
 	if scanInterval > 0 {
 		go runAutoScanner(store, scanInterval)
 	}
@@ -41,19 +46,15 @@ func main() {
 	log.Fatal(http.ListenAndServe(addr, mux))
 }
 
-// parseScanInterval reads AGENT_STORE_SCAN_INTERVAL_SECS. 0 disables.
-// Default = 900 (15 minutes).
-func parseScanInterval() time.Duration {
-	raw := os.Getenv("AGENT_STORE_SCAN_INTERVAL_SECS")
-	if raw == "" {
-		return 15 * time.Minute
+// autoScanInterval is AGENT_STORE_SCAN_INTERVAL_SECS as a duration; 0 turns
+// the scan off. A negative value is refused: it used to be logged and replaced
+// with the default, which ran a scan nobody had asked for.
+func autoScanInterval(settings *servicesettings.Registry) (time.Duration, error) {
+	seconds := settings.Integer(config.SettingAutoScanIntervalInSeconds)
+	if seconds < 0 {
+		return 0, fmt.Errorf("AGENT_STORE_SCAN_INTERVAL_SECS is %d; it must be 0 (no scan) or a number of seconds", seconds)
 	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < 0 {
-		log.Printf("auto-scan: invalid AGENT_STORE_SCAN_INTERVAL_SECS=%q, using default 15m", raw)
-		return 15 * time.Minute
-	}
-	return time.Duration(n) * time.Second
+	return time.Duration(seconds) * time.Second, nil
 }
 
 // runAutoScanner periodically re-walks $HOME so out-of-band edits to tracked

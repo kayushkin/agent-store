@@ -10,7 +10,9 @@ import (
 	"strings"
 
 	agentstore "github.com/kayushkin/agent-store"
+	"github.com/kayushkin/agent-store/internal/config"
 	"github.com/kayushkin/agent-store/internal/textutil"
+	"github.com/kayushkin/llm-bridge/servicesettings"
 )
 
 type inberAgentsFile struct {
@@ -90,10 +92,12 @@ func displayNameFor(id, configuredName string) string {
 }
 
 func main() {
-	inberPath := os.Getenv("INBER_PATH")
-	if inberPath == "" {
-		inberPath = os.ExpandEnv("$HOME/repos/inber")
+	settings, err := config.NewMigrateInberCommandSettingsRegistry(servicesettings.ProcessEnvironment())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
+	inberPath := settings.String(config.SettingInberRepositoryPath)
 
 	store, err := agentstore.Open("")
 	if err != nil {

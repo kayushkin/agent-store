@@ -25,6 +25,19 @@ echo "==> Building $BINARY..."
 go build -o "$BINARY" ./cmd/server
 echo "    built: $(ls -lh "$BINARY" | awk '{print $5}')"
 
+echo "==> Checking the running service's environment..."
+# A set AGENT_STORE_ variable the declarations do not name, or an interval that
+# is not a number, stops the new binary at boot. Build the registry from the
+# running service's own environment first. The test prints a verdict, never a
+# value.
+LIVE_PID="$(systemctl --user show -p MainPID --value "$SERVICE")"
+if [ -n "$LIVE_PID" ] && [ "$LIVE_PID" != "0" ]; then
+  go test -count=1 -run '^TestTheLiveProcessEnvironmentBuildsARegistry$' ./internal/config -args -live-environment-file="/proc/$LIVE_PID/environ" \
+    || { echo "ERROR: the new binary would refuse the running service's environment — not installing"; exit 1; }
+else
+  echo "    $SERVICE is not running, so there is no environment to check"
+fi
+
 echo "==> Stopping $SERVICE..."
 systemctl --user stop "$SERVICE" 2>/dev/null || true
 sleep 1

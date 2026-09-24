@@ -12,7 +12,9 @@ import (
 	"strings"
 
 	agentstore "github.com/kayushkin/agent-store"
+	"github.com/kayushkin/agent-store/internal/config"
 	"github.com/kayushkin/agent-store/internal/textutil"
+	"github.com/kayushkin/llm-bridge/servicesettings"
 )
 
 // mapping.json structures
@@ -151,10 +153,11 @@ func resolveAgentIdentity(ma MappingAgent, ia InberAgent, hasInber bool) agentId
 }
 
 func main() {
-	dbPath := os.Getenv("AGENT_STORE_DB")
-	if dbPath == "" {
-		dbPath = agentstore.DefaultPath()
+	settings, err := config.NewSeedCommandSettingsRegistry(servicesettings.ProcessEnvironment())
+	if err != nil {
+		log.Fatal(err)
 	}
+	dbPath := settings.String(config.SettingDatabasePath)
 
 	repoRoot := filepath.Dir(filepath.Dir(os.Args[0]))
 	// Try to find repo root from working directory
@@ -167,11 +170,7 @@ func main() {
 		mappingPath = os.Args[1]
 	}
 
-	inberRoot := os.Getenv("INBER_ROOT")
-	if inberRoot == "" {
-		home, _ := os.UserHomeDir()
-		inberRoot = filepath.Join(home, "repos/inber")
-	}
+	inberRoot := settings.String(config.SettingInberRepositoryPath)
 
 	// Read mapping.json
 	data, err := os.ReadFile(mappingPath)
