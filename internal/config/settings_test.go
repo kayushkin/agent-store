@@ -42,7 +42,7 @@ func TestTheRegistriesReadTheSameValuesTheCommandsAlwaysDid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The one deliberate change: before 2026-09-25 the default was ":8300",
+	// The one deliberate change: before 2026-09-24 the default was ":8300",
 	// every interface, for a server with no auth on its prompt write routes.
 	if got := server.String(SettingListenAddress); got != "127.0.0.1:8300" {
 		t.Errorf("listen address with nothing set = %q, want loopback only", got)
