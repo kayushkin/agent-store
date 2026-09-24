@@ -51,6 +51,11 @@ const (
 	SettingInberRepositoryPath       = "inber_repository_path"
 )
 
+// DefaultListenAddress binds the standalone server to loopback. Every caller
+// on this host finds it at http://localhost:8300, and nothing off the host
+// has a reason to reach an unauthenticated prompt editor.
+const DefaultListenAddress = "127.0.0.1:8300"
+
 // DefaultDatabasePath is the database every command opens with AGENT_STORE_DB
 // unset. It is the library's own default, not a copy of it.
 func DefaultDatabasePath() string {
@@ -76,8 +81,8 @@ func databasePathDefinition() servicesettings.Definition {
 // server has no operator gate: GET /settings is as open as every other route.
 func ServerSettingDefinitions() []servicesettings.Definition {
 	return []servicesettings.Definition{
-		{Key: SettingListenAddress, EnvironmentVariable: "AGENT_STORE_ADDR", Kind: msg.ServiceSettingKindWiring, ValueType: msg.ServiceSettingValueTypeString, Default: ":8300",
-			Description: "The host:port the standalone server listens on. The default binds every interface, and no route here asks for credentials. Changing it moves the server for everything that finds it through AGENT_STORE_URL."},
+		{Key: SettingListenAddress, EnvironmentVariable: "AGENT_STORE_ADDR", Kind: msg.ServiceSettingKindWiring, ValueType: msg.ServiceSettingValueTypeString, Default: DefaultListenAddress,
+			Description: "The host:port the standalone server listens on. The default binds loopback only, because no route here asks for credentials and PUT /prompt-sections/{id} rewrites the prompt every agent receives; an address such as :8300 opens those routes to every interface. Changing it moves the server for everything that finds it through AGENT_STORE_URL."},
 		databasePathDefinition(),
 		{Key: SettingAutoScanIntervalInSeconds, EnvironmentVariable: "AGENT_STORE_SCAN_INTERVAL_SECS", Kind: msg.ServiceSettingKindBehaviour, ValueType: msg.ServiceSettingValueTypeInteger, Default: "900",
 			Description: "Seconds between the server's scans of $HOME for edits to tracked files; 0 turns the scan off. A negative value stops the server at start. Changing it changes how soon an edit to a rendered prompt file is carried back."},

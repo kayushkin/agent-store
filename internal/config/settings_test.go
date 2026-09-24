@@ -42,8 +42,10 @@ func TestTheRegistriesReadTheSameValuesTheCommandsAlwaysDid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := server.String(SettingListenAddress); got != ":8300" {
-		t.Errorf("listen address with nothing set = %q", got)
+	// The one deliberate change: before 2026-09-25 the default was ":8300",
+	// every interface, for a server with no auth on its prompt write routes.
+	if got := server.String(SettingListenAddress); got != "127.0.0.1:8300" {
+		t.Errorf("listen address with nothing set = %q, want loopback only", got)
 	}
 	if got := server.String(SettingDatabasePath); got != DefaultDatabasePath() || !strings.HasSuffix(got, filepath.Join(".config", "agent-store", "agents.db")) {
 		t.Errorf("database with nothing set = %q", got)
@@ -105,7 +107,7 @@ func TestTheRegistriesReadTheSameValuesTheCommandsAlwaysDid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if empty.String(SettingListenAddress) != ":8300" || empty.Integer(SettingAutoScanIntervalInSeconds) != 900 {
+	if empty.String(SettingListenAddress) != "127.0.0.1:8300" || empty.Integer(SettingAutoScanIntervalInSeconds) != 900 {
 		t.Errorf("empty variables: address=%q interval=%d", empty.String(SettingListenAddress), empty.Integer(SettingAutoScanIntervalInSeconds))
 	}
 }
