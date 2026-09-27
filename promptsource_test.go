@@ -684,3 +684,91 @@ func TestDifferentEditsToOneSectionInTwoFilesStillHoldTheSecond(t *testing.T) {
 		t.Fatal("the conflicting edit was overwritten")
 	}
 }
+
+// Agents keep AGENTS.md and CLAUDE.md identical, so an added section usually
+// lands in both. That is one edit: the Files page shows it once, the tagger is
+// asked once, and approving it settles both files.
+func TestTheSameAddedSectionInBothFilesIsOneEditToApprove(t *testing.T) {
+	f := newPromptFixture(t)
+	id := f.importHost()
+	f.render(id)
+
+	edited := strings.Replace(f.read("AGENTS.md"), "# Overview", "## Reminders\n\nOne coordinator.\n\n# Overview", 1)
+	f.write("AGENTS.md", edited)
+	f.write("CLAUDE.md", edited)
+	reconciliation, err := f.store.ReconcilePromptDrifts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reconciliation.Detected) != 2 {
+		t.Fatalf("detected %d drifts, want one per file", len(reconciliation.Detected))
+	}
+	needingLabels := 0
+	for _, drift := range reconciliation.Detected {
+		if drift.NeedsAnnotation() {
+			needingLabels++
+		}
+	}
+	if needingLabels != 1 {
+		t.Fatalf("%d drifts ask the tagger for labels, want 1", needingLabels)
+	}
+
+	view, _ := f.store.GetPromptCollectionView(id)
+	if len(view.OpenDrifts) != 1 {
+		t.Fatalf("the view shows %d drifts, want the one edit", len(view.OpenDrifts))
+	}
+	shown := view.OpenDrifts[0]
+	if len(shown.Twins) != 1 || shown.Twins[0].Path == shown.Path {
+		t.Fatalf("twins = %+v, want the other file", shown.Twins)
+	}
+
+	annotation := PromptDriftAnnotation{InsertedSections: []PromptDriftInsertedSectionLabel{{OperationIndex: 0, Tags: []string{"scheduler"}}}}
+	if err := f.store.ApplyPromptDrift(shown.ID, &annotation); err != nil {
+		t.Fatal(err)
+	}
+	twin, err := f.store.GetPromptDrift(shown.Twins[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if twin.Status != PromptDriftStatusApplied {
+		t.Fatalf("twin status = %q, want %q", twin.Status, PromptDriftStatusApplied)
+	}
+	if result := f.render(id); result.RefusedReason != "" {
+		t.Fatalf("render refused after approving: %s", result.RefusedReason)
+	}
+	view, _ = f.store.GetPromptCollectionView(id)
+	if len(view.OpenDrifts) != 0 {
+		t.Fatalf("open drifts = %+v, want none", view.OpenDrifts)
+	}
+	for _, output := range view.Outputs {
+		if output.AccountedSHA256 != output.DiskSHA256 || !output.MatchesRender {
+			t.Fatalf("%s is not accounted for after approving", output.RelativePath)
+		}
+	}
+}
+
+func TestDismissingOneFileOfAnEditDismissesTheOther(t *testing.T) {
+	f := newPromptFixture(t)
+	id := f.importHost()
+	f.render(id)
+	rendered := f.read("AGENTS.md")
+	edited := rendered + "\n## Scratch\n\nnot wanted\n"
+	f.write("AGENTS.md", edited)
+	f.write("CLAUDE.md", edited)
+	if _, err := f.store.ReconcilePromptDrifts(); err != nil {
+		t.Fatal(err)
+	}
+	view, _ := f.store.GetPromptCollectionView(id)
+	if len(view.OpenDrifts) != 1 {
+		t.Fatalf("the view shows %d drifts, want 1", len(view.OpenDrifts))
+	}
+	if _, err := f.store.DismissPromptDrift(view.OpenDrifts[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if result := f.render(id); result.RefusedReason != "" {
+		t.Fatalf("render refused after dismissing: %s", result.RefusedReason)
+	}
+	if f.read("AGENTS.md") != rendered || f.read("CLAUDE.md") != rendered {
+		t.Fatal("the dismissed edit survived the render")
+	}
+}

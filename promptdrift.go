@@ -72,12 +72,34 @@ type PromptDrift struct {
 	Annotation      *PromptDriftAnnotation `json:"annotation,omitempty"`
 	CreatedAt       int64                  `json:"created_at"`
 	ResolvedAt      int64                  `json:"resolved_at,omitempty"`
+	// Twins are the other open or held drifts in the collection whose file
+	// holds this same content: one edit an agent made to both AGENTS.md and
+	// CLAUDE.md. They are one change, so applying or dismissing any of them
+	// settles them all, and the lowest id stands for the group.
+	Twins []PromptDriftTwin `json:"twins,omitempty"`
+}
+
+type PromptDriftTwin struct {
+	ID       int64  `json:"id"`
+	OutputID int64  `json:"output_id"`
+	Path     string `json:"path"`
+}
+
+// StandsForItsTwins reports whether this drift is the one shown and annotated
+// for its group of twins.
+func (d *PromptDrift) StandsForItsTwins() bool {
+	for _, twin := range d.Twins {
+		if twin.ID < d.ID {
+			return false
+		}
+	}
+	return true
 }
 
 // NeedsAnnotation reports whether the drift is waiting on labels for sections
 // it adds — the one thing a tagging agent is asked for.
 func (d *PromptDrift) NeedsAnnotation() bool {
-	if d.Status != PromptDriftStatusHeld || d.Annotation != nil {
+	if d.Status != PromptDriftStatusHeld || d.Annotation != nil || !d.StandsForItsTwins() {
 		return false
 	}
 	for _, operation := range d.Operations {
@@ -112,7 +134,39 @@ func scanPromptDrift(row rowScanner) (*PromptDrift, error) {
 }
 
 func (s *Store) GetPromptDrift(id int64) (*PromptDrift, error) {
-	return scanPromptDrift(s.db.QueryRow(`SELECT `+promptDriftColumns+promptDriftJoins+`WHERE d.id=?`, id))
+	drift, err := scanPromptDrift(s.db.QueryRow(`SELECT `+promptDriftColumns+promptDriftJoins+`WHERE d.id=?`, id))
+	if err != nil {
+		return nil, err
+	}
+	if err := s.findPromptDriftTwins(drift); err != nil {
+		return nil, err
+	}
+	return drift, nil
+}
+
+// findPromptDriftTwins fills Twins for an open or held drift.
+func (s *Store) findPromptDriftTwins(drift *PromptDrift) error {
+	drift.Twins = nil
+	if drift.Status != PromptDriftStatusOpen && drift.Status != PromptDriftStatusHeld {
+		return nil
+	}
+	rows, err := s.db.Query(`SELECT d.id, d.output_id, c.root_path, o.relative_path`+promptDriftJoins+`
+		WHERE d.collection_id=? AND d.disk_sha256=? AND d.id<>? AND d.status IN (?, ?) ORDER BY d.id`,
+		drift.CollectionID, drift.DiskSHA256, drift.ID, PromptDriftStatusOpen, PromptDriftStatusHeld)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var twin PromptDriftTwin
+		var root, relativePath string
+		if err := rows.Scan(&twin.ID, &twin.OutputID, &root, &relativePath); err != nil {
+			return err
+		}
+		twin.Path = filepath.Join(root, relativePath)
+		drift.Twins = append(drift.Twins, twin)
+	}
+	return rows.Err()
 }
 
 // GetPromptDriftDiskContent returns the file content the drift was seen with.
@@ -151,7 +205,16 @@ func (s *Store) ListPromptDrifts(collectionID int64, statuses []string) ([]Promp
 		}
 		out = append(out, *drift)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	for i := range out {
+		if err := s.findPromptDriftTwins(&out[i]); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 func (s *Store) promptDriftDismissed(outputID int64, diskSHA string) (bool, error) {
@@ -499,7 +562,8 @@ func validatePromptDriftAnnotation(drift *PromptDrift, annotation *PromptDriftAn
 // overrides the stored one when given. Everything happens in one transaction
 // and is checked before it commits: afterwards every section of the drifted
 // file must be present in the collection, in the file's order. It does not
-// render; the caller does.
+// render; the caller does. Its twins whose files still hold the same content
+// are applied with it.
 func (s *Store) ApplyPromptDrift(id int64, annotation *PromptDriftAnnotation) error {
 	drift, err := s.GetPromptDrift(id)
 	if err != nil {
@@ -528,6 +592,18 @@ func (s *Store) ApplyPromptDrift(id int64, annotation *PromptDriftAnnotation) er
 	}
 	if sha256Hex(current) != drift.DiskSHA256 {
 		return fmt.Errorf("%s changed again since drift %d was recorded; reconcile to pick up the new content", drift.Path, id)
+	}
+	// A twin whose file has changed again since is left for the next scan,
+	// which supersedes it.
+	var twinsStillHoldingTheEdit []PromptDriftTwin
+	for _, twin := range drift.Twins {
+		twinContent, err := os.ReadFile(twin.Path)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		if err == nil && sha256Hex(twinContent) == drift.DiskSHA256 {
+			twinsStillHoldingTheEdit = append(twinsStillHoldingTheEdit, twin)
+		}
 	}
 	labels := map[int]PromptDriftInsertedSectionLabel{}
 	for _, label := range annotation.InsertedSections {
@@ -578,16 +654,29 @@ func (s *Store) ApplyPromptDrift(id int64, annotation *PromptDriftAnnotation) er
 		if err := verifySectionsAccountForFile(tx, drift.CollectionID, disk); err != nil {
 			return err
 		}
-		if err := s.markPromptOutputAccounted(tx, drift.OutputID, drift.DiskSHA256); err != nil {
-			return err
-		}
 		encoded, err := json.Marshal(annotation)
 		if err != nil {
 			return err
 		}
-		_, err = tx.Exec(`UPDATE prompt_drifts SET status=?, held_reason=NULL, annotation=?, resolved_at=? WHERE id=?`, PromptDriftStatusApplied, string(encoded), now(), id)
-		return err
+		settled := append([]PromptDriftTwin{{ID: id, OutputID: drift.OutputID, Path: drift.Path}}, twinsStillHoldingTheEdit...)
+		for _, settledDrift := range settled {
+			if err := s.markPromptOutputAccounted(tx, settledDrift.OutputID, drift.DiskSHA256); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(`UPDATE prompt_drifts SET status=?, held_reason=NULL, annotation=?, resolved_at=? WHERE id=?`, PromptDriftStatusApplied, string(encoded), now(), settledDrift.ID); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
+}
+
+func promptDriftTwinIDs(twins []PromptDriftTwin) []int64 {
+	ids := make([]int64, 0, len(twins))
+	for _, twin := range twins {
+		ids = append(ids, twin.ID)
+	}
+	return ids
 }
 
 // promptSectionPositionForInsert finds a position between the neighbours the
@@ -684,6 +773,7 @@ func verifySectionsAccountForFile(tx *sql.Tx, collectionID int64, disk []byte) e
 // DismissPromptDrift records that the edit in the file is not wanted. The
 // file is left alone until the next render, which overwrites it. The edit is
 // not lost: the drift row keeps the content, and so does the file's history.
+// Its twins are dismissed with it.
 func (s *Store) DismissPromptDrift(id int64) (*PromptDrift, error) {
 	drift, err := s.GetPromptDrift(id)
 	if err != nil {
@@ -692,7 +782,15 @@ func (s *Store) DismissPromptDrift(id int64) (*PromptDrift, error) {
 	if drift.Status != PromptDriftStatusOpen && drift.Status != PromptDriftStatusHeld {
 		return nil, fmt.Errorf("drift %d is %s; only an open or held drift can be dismissed", id, drift.Status)
 	}
-	if _, err := s.db.Exec(`UPDATE prompt_drifts SET status=?, resolved_at=? WHERE id=?`, PromptDriftStatusDismissed, now(), id); err != nil {
+	err = s.inPromptTransaction(func(tx *sql.Tx) error {
+		for _, dismissedID := range append([]int64{id}, promptDriftTwinIDs(drift.Twins)...) {
+			if _, err := tx.Exec(`UPDATE prompt_drifts SET status=?, resolved_at=? WHERE id=?`, PromptDriftStatusDismissed, now(), dismissedID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
 	return s.GetPromptDrift(id)

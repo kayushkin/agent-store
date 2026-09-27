@@ -129,7 +129,9 @@ type PromptCollectionView struct {
 	Sections   []PromptSection          `json:"sections"`
 	Outputs    []PromptCollectionOutput `json:"outputs"`
 	Rendered   string                   `json:"rendered"`
-	OpenDrifts []PromptDrift            `json:"open_drifts"`
+	// OpenDrifts holds one open or held drift per edit; a drift's twins in
+	// the collection's other files ride on it rather than appear again.
+	OpenDrifts []PromptDrift `json:"open_drifts"`
 }
 
 // PromptRenderResult reports what a render wrote. RefusedReason is set, and
@@ -246,7 +248,13 @@ func (s *Store) GetPromptCollectionView(collectionID int64) (*PromptCollectionVi
 	if err != nil {
 		return nil, err
 	}
-	return &PromptCollectionView{Collection: *c, Sections: sections, Outputs: outputs, Rendered: rendered, OpenDrifts: drifts}, nil
+	editsWaiting := []PromptDrift{}
+	for _, drift := range drifts {
+		if drift.StandsForItsTwins() {
+			editsWaiting = append(editsWaiting, drift)
+		}
+	}
+	return &PromptCollectionView{Collection: *c, Sections: sections, Outputs: outputs, Rendered: rendered, OpenDrifts: editsWaiting}, nil
 }
 
 // EnsurePromptCollection returns the collection for (scope, root), creating it
