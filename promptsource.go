@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -330,6 +331,172 @@ func (s *Store) unusedPromptCollectionSlug(scope, rootPath string) (string, erro
 		}
 		slug = fmt.Sprintf("%s-%d", base, attempt)
 	}
+}
+
+// ErrPromptCollectionMoveConflict is returned when moving a collection's root
+// would collide with a row that already exists, or would strand an edit that
+// is waiting on the old path. The HTTP layer answers it with 409.
+var ErrPromptCollectionMoveConflict = errors.New("prompt collection move conflict")
+
+// ErrPromptCollectionMoveInvalid is returned when the move asked for is not
+// one a collection can make. The HTTP layer answers it with 400.
+var ErrPromptCollectionMoveInvalid = errors.New("invalid prompt collection move")
+
+// PromptCollectionRootMove reports what MovePromptCollectionRoot changed.
+type PromptCollectionRootMove struct {
+	CollectionID        int64                 `json:"collection_id"`
+	PreviousRootPath    string                `json:"previous_root_path"`
+	PreviousSlug        string                `json:"previous_slug"`
+	RenamedTrackedFiles []TrackedFileRename   `json:"renamed_tracked_files"`
+	View                *PromptCollectionView `json:"view"`
+}
+
+// TrackedFileRename is one tracked_files row whose path a root move changed.
+// The row keeps its id, so its version history stays with it.
+type TrackedFileRename struct {
+	TrackedFileID int64  `json:"tracked_file_id"`
+	PreviousPath  string `json:"previous_path"`
+	Path          string `json:"path"`
+}
+
+// MovePromptCollectionRoot points a project collection at a new root
+// directory, for a repo whose directory was renamed. The collection keeps its
+// id, sections, revisions and outputs; each tracked file at one of its output
+// paths under the old root is renamed to the same relative path under the new
+// root, so the file's version history stays attached. newSlug replaces the
+// slug when not empty. Nothing on disk is touched.
+//
+// It refuses, and changes nothing, when the new root is not absolute, the
+// collection is not a project collection, another collection already has the
+// root or the slug, a tracked file already exists at a target path, or the
+// collection has an open or held drift (that edit belongs to a file at the old
+// path and must be settled first).
+func (s *Store) MovePromptCollectionRoot(collectionID int64, newRootPath, newSlug string) (*PromptCollectionRootMove, error) {
+	newRootPath = strings.TrimSpace(newRootPath)
+	newSlug = strings.TrimSpace(newSlug)
+	if newRootPath == "" || !filepath.IsAbs(newRootPath) {
+		return nil, fmt.Errorf("%w: root_path %q must be an absolute path", ErrPromptCollectionMoveInvalid, newRootPath)
+	}
+	newRootPath = filepath.Clean(newRootPath)
+
+	move := &PromptCollectionRootMove{CollectionID: collectionID, RenamedTrackedFiles: []TrackedFileRename{}}
+	err := s.inPromptTransaction(func(tx *sql.Tx) error {
+		var scope, oldRootPath, oldSlug string
+		if err := tx.QueryRow(`SELECT scope, root_path, slug FROM prompt_collections WHERE id=?`, collectionID).
+			Scan(&scope, &oldRootPath, &oldSlug); err != nil {
+			return err
+		}
+		move.PreviousRootPath, move.PreviousSlug = oldRootPath, oldSlug
+		if scope != promptCollectionScopeProject {
+			return fmt.Errorf("%w: only a %q collection can move its root; collection %d is %q", ErrPromptCollectionMoveInvalid, promptCollectionScopeProject, collectionID, scope)
+		}
+		if newRootPath == oldRootPath && (newSlug == "" || newSlug == oldSlug) {
+			return fmt.Errorf("%w: collection %d is already rooted at %s with that slug", ErrPromptCollectionMoveInvalid, collectionID, newRootPath)
+		}
+
+		var otherID int64
+		err := tx.QueryRow(`SELECT id FROM prompt_collections WHERE scope=? AND root_path=? AND id<>?`, scope, newRootPath, collectionID).Scan(&otherID)
+		if err == nil {
+			return fmt.Errorf("%w: collection %d is already the %s collection rooted at %s", ErrPromptCollectionMoveConflict, otherID, scope, newRootPath)
+		} else if err != sql.ErrNoRows {
+			return err
+		}
+		if newSlug != "" {
+			err := tx.QueryRow(`SELECT id FROM prompt_collections WHERE slug=? AND id<>?`, newSlug, collectionID).Scan(&otherID)
+			if err == nil {
+				return fmt.Errorf("%w: slug %q belongs to collection %d", ErrPromptCollectionMoveConflict, newSlug, otherID)
+			} else if err != sql.ErrNoRows {
+				return err
+			}
+		}
+
+		var waitingDriftIDs []int64
+		rows, err := tx.Query(`SELECT id FROM prompt_drifts WHERE collection_id=? AND status IN (?, ?) ORDER BY id`,
+			collectionID, PromptDriftStatusOpen, PromptDriftStatusHeld)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			waitingDriftIDs = append(waitingDriftIDs, id)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if len(waitingDriftIDs) > 0 {
+			return fmt.Errorf("%w: collection %d has open or held drifts %v; apply or dismiss them before moving its root", ErrPromptCollectionMoveConflict, collectionID, waitingDriftIDs)
+		}
+
+		var relativePaths []string
+		rows, err = tx.Query(`SELECT relative_path FROM prompt_collection_outputs WHERE collection_id=? ORDER BY id`, collectionID)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var relativePath string
+			if err := rows.Scan(&relativePath); err != nil {
+				rows.Close()
+				return err
+			}
+			relativePaths = append(relativePaths, relativePath)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+
+		ts := now()
+		if newRootPath != oldRootPath {
+			for _, relativePath := range relativePaths {
+				oldPath := filepath.Join(oldRootPath, relativePath)
+				newPath := filepath.Join(newRootPath, relativePath)
+				err := tx.QueryRow(`SELECT id FROM tracked_files WHERE path=?`, newPath).Scan(&otherID)
+				if err == nil {
+					return fmt.Errorf("%w: tracked file %d already exists at %s", ErrPromptCollectionMoveConflict, otherID, newPath)
+				} else if err != sql.ErrNoRows {
+					return err
+				}
+				var trackedFileID int64
+				err = tx.QueryRow(`SELECT id FROM tracked_files WHERE path=?`, oldPath).Scan(&trackedFileID)
+				if err == sql.ErrNoRows {
+					continue // never scanned or rendered: no history to carry
+				} else if err != nil {
+					return err
+				}
+				if _, err := tx.Exec(`UPDATE tracked_files SET path=?, updated_at=? WHERE id=?`, newPath, ts, trackedFileID); err != nil {
+					return err
+				}
+				move.RenamedTrackedFiles = append(move.RenamedTrackedFiles, TrackedFileRename{TrackedFileID: trackedFileID, PreviousPath: oldPath, Path: newPath})
+			}
+		}
+
+		slug := oldSlug
+		if newSlug != "" {
+			slug = newSlug
+		}
+		_, err = tx.Exec(`UPDATE prompt_collections SET root_path=?, slug=?, updated_at=? WHERE id=?`, newRootPath, slug, ts, collectionID)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	finalSlug := move.PreviousSlug
+	if newSlug != "" {
+		finalSlug = newSlug
+	}
+	log.Printf("prompt collection %d moved: root %s -> %s, slug %s -> %s, %d tracked files renamed %+v",
+		collectionID, move.PreviousRootPath, newRootPath, move.PreviousSlug, finalSlug, len(move.RenamedTrackedFiles), move.RenamedTrackedFiles)
+	view, err := s.GetPromptCollectionView(collectionID)
+	if err != nil {
+		return nil, fmt.Errorf("collection %d moved, but reading it back failed: %w", collectionID, err)
+	}
+	move.View = view
+	return move, nil
 }
 
 // ------------------------------------------------------------------- sections

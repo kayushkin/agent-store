@@ -206,6 +206,20 @@ file by the splitter — no model writes them. A tagging agent may only annotate
 (`PUT /prompt-drifts/{id}/annotation`): tags for added sections, and a note. Applying checks, inside the transaction, that every section of the
 edited file is then present in the collection in the file's order.
 
+**Moving a root** (`PUT /prompt-collections/{id}/root`, body
+`{"root_path": "/abs/new/root", "slug": "optional-new-slug"}`) is for a repo
+whose directory was renamed. In one transaction it sets the collection's
+`root_path` (and `slug`, when one is sent; empty keeps it) and renames each
+`tracked_files` row at one of the collection's output paths under the old root
+to the same relative path under the new root, so the collection keeps its id,
+sections, revisions and outputs, and each file keeps its version history. It
+touches nothing on disk, and the server log records every move. It answers
+**400** when the root is not absolute or the collection is not a `project`
+collection, and **409** when another collection has that root or slug, a
+tracked file already exists at a target path (a scan ran after the directory
+moved), or the collection has an open or held drift. There is no route to
+delete a collection.
+
 `GET /context/resolve?harness=&work_dir=` returns what the bridge should
 inject: the global collection, then each project collection whose root is
 `work_dir` or an ancestor. For a `native_file` harness, collections that render

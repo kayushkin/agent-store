@@ -17,6 +17,7 @@ func registerPromptSourceHandlers(mux *http.ServeMux, h *handler) {
 	mux.HandleFunc("POST /prompt-collections/{id}/sections", h.createPromptSection)
 	mux.HandleFunc("POST /prompt-collections/{id}/render", h.renderPromptCollection)
 	mux.HandleFunc("POST /prompt-collections/{id}/outputs", h.addPromptCollectionOutput)
+	mux.HandleFunc("PUT /prompt-collections/{id}/root", h.movePromptCollectionRoot)
 	mux.HandleFunc("GET /prompt-collections/{id}/revisions", h.listPromptCollectionRevisions)
 	mux.HandleFunc("POST /prompt-collections/import-untracked", h.importUntrackedPromptFiles)
 	mux.HandleFunc("POST /prompt-outputs/{id}/enable", h.enablePromptOutput)
@@ -242,6 +243,37 @@ func (h *handler) addPromptCollectionOutput(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	writeJSON(w, 201, view)
+}
+
+// movePromptCollectionRoot points a project collection at a new root, for a
+// repo whose directory was renamed. slug is optional; empty keeps it.
+func (h *handler) movePromptCollectionRoot(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		writeErr(w, 400, "bad id")
+		return
+	}
+	var body struct {
+		RootPath string `json:"root_path"`
+		Slug     string `json:"slug"`
+	}
+	if err := decodeStrict(r, &body); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	move, err := h.s.MovePromptCollectionRoot(id, body.RootPath, body.Slug)
+	switch {
+	case errors.Is(err, ErrPromptCollectionMoveConflict):
+		writeErr(w, 409, err.Error())
+		return
+	case errors.Is(err, ErrPromptCollectionMoveInvalid):
+		writeErr(w, 400, err.Error())
+		return
+	case err != nil:
+		writeStoreErr(w, err, 500)
+		return
+	}
+	writeJSON(w, 200, move)
 }
 
 func (h *handler) setPromptOutputEnabled(w http.ResponseWriter, r *http.Request, enabled bool) {
