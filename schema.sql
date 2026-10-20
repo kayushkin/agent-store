@@ -310,7 +310,8 @@ CREATE TABLE IF NOT EXISTS prompt_collections (
     root_path TEXT NOT NULL,               -- $HOME for global, repo root for project
     description TEXT,
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    retired_at INTEGER NOT NULL DEFAULT 0  -- RetirePromptCollection; 0 while in use
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_prompt_collections_scope_root ON prompt_collections(scope, root_path);
 

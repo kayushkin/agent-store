@@ -115,6 +115,7 @@ func (s *Store) migrate() error {
 		"ALTER TABLE agent_harness ADD COLUMN is_default INTEGER DEFAULT 0",
 		"ALTER TABLE agent_harness ADD COLUMN subagent_allow TEXT",
 		"ALTER TABLE tracked_files ADD COLUMN ignored_by_rule_id INTEGER",
+		"ALTER TABLE prompt_collections ADD COLUMN retired_at INTEGER NOT NULL DEFAULT 0",
 	}
 	for _, m := range postMigrations {
 		s.db.Exec(m) // ignore "duplicate column" errors

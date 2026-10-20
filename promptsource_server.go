@@ -18,6 +18,7 @@ func registerPromptSourceHandlers(mux *http.ServeMux, h *handler) {
 	mux.HandleFunc("POST /prompt-collections/{id}/render", h.renderPromptCollection)
 	mux.HandleFunc("POST /prompt-collections/{id}/outputs", h.addPromptCollectionOutput)
 	mux.HandleFunc("PUT /prompt-collections/{id}/root", h.movePromptCollectionRoot)
+	mux.HandleFunc("POST /prompt-collections/{id}/retire", h.retirePromptCollection)
 	mux.HandleFunc("GET /prompt-collections/{id}/revisions", h.listPromptCollectionRevisions)
 	mux.HandleFunc("POST /prompt-collections/import-untracked", h.importUntrackedPromptFiles)
 	mux.HandleFunc("POST /prompt-outputs/{id}/enable", h.enablePromptOutput)
@@ -598,4 +599,30 @@ func (h *handler) broadcastRenderedFiles(result *PromptRenderResult) {
 			h.onFileSaved(&file, version)
 		}
 	}
+}
+
+// retirePromptCollection takes a collection out of use; note is required.
+func (h *handler) retirePromptCollection(w http.ResponseWriter, r *http.Request) {
+	id, err := parseID(r)
+	if err != nil {
+		writeErr(w, 400, "bad id")
+		return
+	}
+	var body struct {
+		Note string `json:"note"`
+	}
+	if err := decodeStrict(r, &body); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	retirement, err := h.s.RetirePromptCollection(id, body.Note)
+	switch {
+	case errors.Is(err, ErrPromptCollectionRetireRefused), errors.Is(err, ErrPromptCollectionRetired):
+		writeErr(w, 409, err.Error())
+		return
+	case err != nil:
+		writeStoreErr(w, err, 500)
+		return
+	}
+	writeJSON(w, 200, retirement)
 }

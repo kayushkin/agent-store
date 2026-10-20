@@ -217,8 +217,20 @@ touches nothing on disk, and the server log records every move. It answers
 **400** when the root is not absolute or the collection is not a `project`
 collection, and **409** when another collection has that root or slug, a
 tracked file already exists at a target path (a scan ran after the directory
-moved), or the collection has an open or held drift. There is no route to
-delete a collection.
+moved), or the collection has an open or held drift.
+
+**Retiring a collection** (`POST /prompt-collections/{id}/retire`, body
+`{"note": "why"}`) is for one that should never have existed, such as a
+collection an import made for a copy of a repo. No route deletes a collection;
+this is the way to take one out of use. In one transaction it deletes every
+section, each with a `delete` revision carrying the note, drops the outputs so
+nothing renders again, and stamps `retired_at`. Lists leave a retired collection
+out, `GET /prompt-collections/{id}` still finds it, `EnsurePromptCollection`
+refuses its root, and `ImportUntrackedPromptFiles` leaves files under that root
+alone. It touches nothing on disk. It answers **409** for the global collection,
+a missing note, one already retired, or one with an open or held drift, and
+**404** for an unknown id. The answer lists the deleted section ids and the
+removed output paths.
 
 `GET /context/resolve?harness=&work_dir=` returns what the bridge should
 inject: the global collection, then each project collection whose root is

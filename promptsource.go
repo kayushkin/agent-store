@@ -62,6 +62,8 @@ type PromptCollection struct {
 	Description string `json:"description,omitempty"`
 	CreatedAt   int64  `json:"created_at"`
 	UpdatedAt   int64  `json:"updated_at"`
+	// RetiredAt is when RetirePromptCollection retired it; 0 while it is in use.
+	RetiredAt int64 `json:"retired_at,omitempty"`
 }
 
 // PromptSection is one piece of the prompt. It names no harness and no file:
@@ -186,19 +188,21 @@ func decodeTags(raw string) []string {
 func (s *Store) getPromptCollection(id int64) (*PromptCollection, error) {
 	var c PromptCollection
 	err := s.db.QueryRow(`
-		SELECT id, slug, title, scope, root_path, COALESCE(description,''), created_at, updated_at
+		SELECT id, slug, title, scope, root_path, COALESCE(description,''), created_at, updated_at, retired_at
 		FROM prompt_collections WHERE id=?`, id).
-		Scan(&c.ID, &c.Slug, &c.Title, &c.Scope, &c.RootPath, &c.Description, &c.CreatedAt, &c.UpdatedAt)
+		Scan(&c.ID, &c.Slug, &c.Title, &c.Scope, &c.RootPath, &c.Description, &c.CreatedAt, &c.UpdatedAt, &c.RetiredAt)
 	if err != nil {
 		return nil, err
 	}
 	return &c, nil
 }
 
+// ListPromptCollections lists the collections in use. A retired collection is
+// left out; getPromptCollection still finds it by id.
 func (s *Store) ListPromptCollections() ([]PromptCollection, error) {
 	rows, err := s.db.Query(`
 		SELECT id, slug, title, scope, root_path, COALESCE(description,''), created_at, updated_at
-		FROM prompt_collections
+		FROM prompt_collections WHERE retired_at=0
 		ORDER BY CASE scope WHEN 'global' THEN 0 ELSE 1 END, root_path`)
 	if err != nil {
 		return nil, err
@@ -277,8 +281,11 @@ func (s *Store) EnsurePromptCollection(scope, rootPath, title, description strin
 	default:
 		return nil, fmt.Errorf("scope must be %q, %q or %q", promptCollectionScopeGlobal, promptCollectionScopeProject, promptCollectionScopeContext)
 	}
-	var id int64
-	err := s.db.QueryRow(`SELECT id FROM prompt_collections WHERE scope=? AND root_path=?`, scope, rootPath).Scan(&id)
+	var id, retiredAt int64
+	err := s.db.QueryRow(`SELECT id, retired_at FROM prompt_collections WHERE scope=? AND root_path=?`, scope, rootPath).Scan(&id, &retiredAt)
+	if err == nil && retiredAt != 0 {
+		return nil, fmt.Errorf("%w: collection %d, the %s collection rooted at %s, was retired", ErrPromptCollectionRetired, id, scope, rootPath)
+	}
 	if err == nil {
 		return s.getPromptCollection(id)
 	}
@@ -1141,6 +1148,10 @@ func (s *Store) ImportUntrackedPromptFiles(globalImportOrder []string) ([]Prompt
 		scope         string
 		relativePaths []string
 	}
+	retiredRoots, err := s.retiredPromptCollectionRoots()
+	if err != nil {
+		return nil, err
+	}
 	groups := map[string]*group{}
 	var roots []string
 	for _, file := range files {
@@ -1159,6 +1170,12 @@ func (s *Store) ImportUntrackedPromptFiles(globalImportOrder []string) ([]Prompt
 				continue
 			}
 			scope = promptCollectionScopeGlobal
+		}
+		if retiredID, retired := retiredRoots[scope][root]; retired {
+			// Someone retired this root's collection on purpose; importing it
+			// again would undo that, and EnsurePromptCollection refuses it.
+			log.Printf("agent-store: import leaves %s alone: collection %d for %s is retired", file.Path, retiredID, root)
+			continue
 		}
 		var claimed int
 		if err := s.db.QueryRow(`
