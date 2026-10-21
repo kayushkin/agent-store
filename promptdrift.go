@@ -615,6 +615,11 @@ func (s *Store) ApplyPromptDrift(id int64, annotation *PromptDriftAnnotation) er
 	}
 
 	return s.inPromptTransaction(func(tx *sql.Tx) error {
+		// The diff anchors every insert in a run of new sections to the same
+		// existing section, the last one before the run. Placing each straight
+		// after that section would reverse the run, so each insert follows the
+		// one placed before it against the same anchor.
+		lastInsertedAfter := map[int64]int64{}
 		for index, operation := range drift.Operations {
 			switch operation.Kind {
 			case PromptMarkdownEditUpdate:
@@ -635,7 +640,11 @@ func (s *Store) ApplyPromptDrift(id int64, annotation *PromptDriftAnnotation) er
 					return fmt.Errorf("operation %d: %w", index, err)
 				}
 			case PromptMarkdownEditInsert:
-				position, err := promptSectionPositionForInsert(tx, drift.CollectionID, operation)
+				placement := operation
+				if previous, ok := lastInsertedAfter[operation.AfterSectionID]; ok && operation.AfterSectionID != 0 {
+					placement.AfterSectionID = previous
+				}
+				position, err := promptSectionPositionForInsert(tx, drift.CollectionID, placement)
 				if err != nil {
 					return fmt.Errorf("operation %d: %w", index, err)
 				}
@@ -645,6 +654,9 @@ func (s *Store) ApplyPromptDrift(id int64, annotation *PromptDriftAnnotation) er
 				}
 				if err := insertPromptSection(tx, section, ctx); err != nil {
 					return fmt.Errorf("operation %d: %w", index, err)
+				}
+				if operation.AfterSectionID != 0 {
+					lastInsertedAfter[operation.AfterSectionID] = section.ID
 				}
 			default:
 				return fmt.Errorf("operation %d: unknown kind %q", index, operation.Kind)

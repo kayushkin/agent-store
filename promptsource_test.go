@@ -238,6 +238,37 @@ func TestAddedSectionIsHeldBlocksRenderAndAppliesWithItsLabels(t *testing.T) {
 	}
 }
 
+// A run of new sections is anchored, every one of them, to the existing
+// section before the run. Applying must keep the run in the file's order.
+func TestSeveralSectionsAddedInARowKeepTheirOrder(t *testing.T) {
+	f := newPromptFixture(t)
+	id := f.importHost()
+	f.render(id)
+
+	f.write("AGENTS.md", strings.Replace(f.read("AGENTS.md"), "# Overview", "## Reminders\n\nOne coordinator.\n\n## Calendar\n\nThrough dash.\n\n## Mail\n\nThrough mailstack.\n\n# Overview", 1))
+	reconciliation, err := f.store.ReconcilePromptDrifts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reconciliation.Detected) != 1 || reconciliation.Detected[0].Status != PromptDriftStatusHeld {
+		t.Fatalf("reconcile = %+v, want one held drift", reconciliation.Detected)
+	}
+	drift := reconciliation.Detected[0]
+	annotation := PromptDriftAnnotation{Note: "three sections", AnnotatedBy: "test", InsertedSections: []PromptDriftInsertedSectionLabel{
+		{OperationIndex: 0, Tags: []string{"scheduler"}}, {OperationIndex: 1, Tags: []string{"calendar"}}, {OperationIndex: 2, Tags: []string{"mail"}}}}
+	if err := f.store.ApplyPromptDrift(drift.ID, &annotation); err != nil {
+		t.Fatal(err)
+	}
+	view, _ := f.store.GetPromptCollectionView(id)
+	var headings []string
+	for _, section := range view.Sections {
+		headings = append(headings, section.Heading)
+	}
+	if got, want := strings.Join(headings, "|"), "# Directives|## Services|## Reminders|## Calendar|## Mail|# Overview|## Scheduler"; got != want {
+		t.Fatalf("order = %s, want %s", got, want)
+	}
+}
+
 func TestDismissedDriftIsOverwrittenButKept(t *testing.T) {
 	f := newPromptFixture(t)
 	id := f.importHost()
