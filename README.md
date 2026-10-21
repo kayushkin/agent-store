@@ -213,11 +213,14 @@ whose directory was renamed. In one transaction it sets the collection's
 `tracked_files` row at one of the collection's output paths under the old root
 to the same relative path under the new root, so the collection keeps its id,
 sections, revisions and outputs, and each file keeps its version history. It
-touches nothing on disk, and the server log records every move. It answers
-**400** when the root is not absolute or the collection is not a `project`
-collection, and **409** when another collection has that root or slug, a
-tracked file already exists at a target path (a scan ran after the directory
-moved), or the collection has an open or held drift.
+touches nothing on disk, and the server log records every move. The scan runs
+on its own timer, so it may already have tracked a moved file at its new path;
+that row belongs to no collection, so the move merges it into the row that
+carries the history (its versions move over, the old row takes its path and
+file state) and lists it under `merged_tracked_files`. It answers **400** when
+the root is not absolute or the collection is not a `project` collection, and
+**409** when another collection has that root or slug, a target path is an
+output of another collection, or the collection has an open or held drift.
 
 **Retiring a collection** (`POST /prompt-collections/{id}/retire`, body
 `{"note": "why"}`) is for one that should never have existed, such as a

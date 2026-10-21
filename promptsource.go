@@ -355,7 +355,18 @@ type PromptCollectionRootMove struct {
 	PreviousRootPath    string                `json:"previous_root_path"`
 	PreviousSlug        string                `json:"previous_slug"`
 	RenamedTrackedFiles []TrackedFileRename   `json:"renamed_tracked_files"`
+	MergedTrackedFiles  []TrackedFileMerge    `json:"merged_tracked_files"`
 	View                *PromptCollectionView `json:"view"`
+}
+
+// TrackedFileMerge is a tracked_files row a scan created at a new path after
+// the directory moved and before the collection did. Its versions moved onto
+// the old row, which took over its path and file state, and the row is gone.
+type TrackedFileMerge struct {
+	MergedTrackedFileID int64  `json:"merged_tracked_file_id"`
+	IntoTrackedFileID   int64  `json:"into_tracked_file_id"`
+	Path                string `json:"path"`
+	VersionsMoved       int64  `json:"versions_moved"`
 }
 
 // TrackedFileRename is one tracked_files row whose path a root move changed.
@@ -373,9 +384,14 @@ type TrackedFileRename struct {
 // root, so the file's version history stays attached. newSlug replaces the
 // slug when not empty. Nothing on disk is touched.
 //
+// The scan runs on its own timer, so it may already have tracked a file at
+// its new path when the move comes. Such a row belongs to no collection; it is
+// merged into the old row (its versions move over, the old row takes its path
+// and file state, and it is deleted) so one row carries the whole history.
+//
 // It refuses, and changes nothing, when the new root is not absolute, the
 // collection is not a project collection, another collection already has the
-// root or the slug, a tracked file already exists at a target path, or the
+// root or the slug, a target path is an output of another collection, or the
 // collection has an open or held drift (that edit belongs to a file at the old
 // path and must be settled first).
 func (s *Store) MovePromptCollectionRoot(collectionID int64, newRootPath, newSlug string) (*PromptCollectionRootMove, error) {
@@ -386,7 +402,7 @@ func (s *Store) MovePromptCollectionRoot(collectionID int64, newRootPath, newSlu
 	}
 	newRootPath = filepath.Clean(newRootPath)
 
-	move := &PromptCollectionRootMove{CollectionID: collectionID, RenamedTrackedFiles: []TrackedFileRename{}}
+	move := &PromptCollectionRootMove{CollectionID: collectionID, RenamedTrackedFiles: []TrackedFileRename{}, MergedTrackedFiles: []TrackedFileMerge{}}
 	err := s.inPromptTransaction(func(tx *sql.Tx) error {
 		var scope, oldRootPath, oldSlug string
 		if err := tx.QueryRow(`SELECT scope, root_path, slug FROM prompt_collections WHERE id=?`, collectionID).
@@ -462,18 +478,37 @@ func (s *Store) MovePromptCollectionRoot(collectionID int64, newRootPath, newSlu
 			for _, relativePath := range relativePaths {
 				oldPath := filepath.Join(oldRootPath, relativePath)
 				newPath := filepath.Join(newRootPath, relativePath)
-				err := tx.QueryRow(`SELECT id FROM tracked_files WHERE path=?`, newPath).Scan(&otherID)
+				var claimingCollectionID int64
+				err := tx.QueryRow(`
+					SELECT o.collection_id FROM prompt_collection_outputs o
+					JOIN prompt_collections c ON c.id = o.collection_id
+					WHERE o.collection_id <> ? AND c.root_path || '/' || o.relative_path = ?`,
+					collectionID, newPath).Scan(&claimingCollectionID)
 				if err == nil {
-					return fmt.Errorf("%w: tracked file %d already exists at %s", ErrPromptCollectionMoveConflict, otherID, newPath)
+					return fmt.Errorf("%w: %s is an output of collection %d", ErrPromptCollectionMoveConflict, newPath, claimingCollectionID)
 				} else if err != sql.ErrNoRows {
+					return err
+				}
+				var scannedAtTargetID int64
+				err = tx.QueryRow(`SELECT id FROM tracked_files WHERE path=?`, newPath).Scan(&scannedAtTargetID)
+				if err == sql.ErrNoRows {
+					scannedAtTargetID = 0
+				} else if err != nil {
 					return err
 				}
 				var trackedFileID int64
 				err = tx.QueryRow(`SELECT id FROM tracked_files WHERE path=?`, oldPath).Scan(&trackedFileID)
 				if err == sql.ErrNoRows {
-					continue // never scanned or rendered: no history to carry
+					continue // never scanned or rendered at the old path: the row at the new path, if any, is the whole history
 				} else if err != nil {
 					return err
+				}
+				if scannedAtTargetID != 0 {
+					merge, err := mergeScannedTrackedFile(tx, scannedAtTargetID, trackedFileID, newPath, ts)
+					if err != nil {
+						return err
+					}
+					move.MergedTrackedFiles = append(move.MergedTrackedFiles, merge)
 				}
 				if _, err := tx.Exec(`UPDATE tracked_files SET path=?, updated_at=? WHERE id=?`, newPath, ts, trackedFileID); err != nil {
 					return err
@@ -496,14 +531,49 @@ func (s *Store) MovePromptCollectionRoot(collectionID int64, newRootPath, newSlu
 	if newSlug != "" {
 		finalSlug = newSlug
 	}
-	log.Printf("prompt collection %d moved: root %s -> %s, slug %s -> %s, %d tracked files renamed %+v",
-		collectionID, move.PreviousRootPath, newRootPath, move.PreviousSlug, finalSlug, len(move.RenamedTrackedFiles), move.RenamedTrackedFiles)
+	log.Printf("prompt collection %d moved: root %s -> %s, slug %s -> %s, %d tracked files renamed %+v, %d scanned at the new path merged %+v",
+		collectionID, move.PreviousRootPath, newRootPath, move.PreviousSlug, finalSlug, len(move.RenamedTrackedFiles), move.RenamedTrackedFiles, len(move.MergedTrackedFiles), move.MergedTrackedFiles)
 	view, err := s.GetPromptCollectionView(collectionID)
 	if err != nil {
 		return nil, fmt.Errorf("collection %d moved, but reading it back failed: %w", collectionID, err)
 	}
 	move.View = view
 	return move, nil
+}
+
+// mergeScannedTrackedFile folds the row a scan created at path into the row
+// that carries the file's history: the versions and per-machine seed state
+// move over (where the old row has no seed state for that machine), the old
+// row takes the scanned row's file state, and the scanned row is deleted. The
+// caller then renames the old row to path.
+func mergeScannedTrackedFile(tx *sql.Tx, scannedID, intoID int64, path string, ts int64) (TrackedFileMerge, error) {
+	merge := TrackedFileMerge{MergedTrackedFileID: scannedID, IntoTrackedFileID: intoID, Path: path}
+	result, err := tx.Exec(`UPDATE tracked_file_versions SET tracked_file_id=? WHERE tracked_file_id=?`, intoID, scannedID)
+	if err != nil {
+		return merge, err
+	}
+	if merge.VersionsMoved, err = result.RowsAffected(); err != nil {
+		return merge, err
+	}
+	if _, err := tx.Exec(`UPDATE OR IGNORE machine_seed_state SET tracked_file_id=? WHERE tracked_file_id=?`, intoID, scannedID); err != nil {
+		return merge, err
+	}
+	if _, err := tx.Exec(`
+		UPDATE tracked_files SET
+			fs_hash = (SELECT fs_hash FROM tracked_files WHERE id=?),
+			size = (SELECT size FROM tracked_files WHERE id=?),
+			mtime = (SELECT mtime FROM tracked_files WHERE id=?),
+			last_scanned_at = (SELECT last_scanned_at FROM tracked_files WHERE id=?),
+			status = (SELECT status FROM tracked_files WHERE id=?),
+			updated_at = ?
+		WHERE id=?`, scannedID, scannedID, scannedID, scannedID, scannedID, ts, intoID); err != nil {
+		return merge, err
+	}
+	// ON DELETE CASCADE takes any seed state the old row already had for that machine.
+	if _, err := tx.Exec(`DELETE FROM tracked_files WHERE id=?`, scannedID); err != nil {
+		return merge, err
+	}
+	return merge, nil
 }
 
 // ------------------------------------------------------------------- sections

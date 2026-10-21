@@ -142,6 +142,92 @@ func TestMovingACollectionRootKeepsItsIdHistoryAndFileVersions(t *testing.T) {
 	}
 }
 
+// The scan runs on its own timer, so it can track the moved files at their
+// new paths before the collection moves. The move then folds each such row
+// into the row that carries the history, instead of refusing.
+func TestMovingACollectionRootMergesRowsTheScanMadeAtTheNewPaths(t *testing.T) {
+	f, id, mux := newMoveFixture(t)
+	oldRoot := filepath.Join(f.home, "repos", "producer")
+	newRoot := filepath.Join(f.home, "repos", "orchestrator")
+	before, err := f.store.GetPromptCollectionView(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyIDs := map[string]int64{}
+	for _, output := range before.Outputs {
+		historyIDs[output.RelativePath] = output.TrackedFileID
+	}
+	versionsBefore := f.count(`SELECT COUNT(*) FROM tracked_file_versions`)
+
+	if err := os.Rename(oldRoot, newRoot); err != nil {
+		t.Fatal(err)
+	}
+	f.write("repos/orchestrator/CLAUDE.md", testRepoPrompt+"\nEdited after the move.\n")
+	if _, err := f.store.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	scannedRows := f.count(`SELECT COUNT(*) FROM tracked_files WHERE path LIKE ?`, newRoot+"/%")
+	if scannedRows != 2 {
+		t.Fatalf("the scan tracked %d files at the new root, want 2 for the test to mean anything", scannedRows)
+	}
+	versionsAfterScan := f.count(`SELECT COUNT(*) FROM tracked_file_versions`)
+
+	response := do(t, mux, "PUT", "/prompt-collections/"+itoa(id)+"/root", `{"root_path":"`+newRoot+`"}`)
+	if response.Code != 200 {
+		t.Fatalf("move = %d %s", response.Code, response.Body.String())
+	}
+	var move PromptCollectionRootMove
+	if err := json.Unmarshal(response.Body.Bytes(), &move); err != nil {
+		t.Fatal(err)
+	}
+	if len(move.MergedTrackedFiles) != 2 || len(move.RenamedTrackedFiles) != 2 {
+		t.Fatalf("move = %+v, want two merged and two renamed", move)
+	}
+	for _, merge := range move.MergedTrackedFiles {
+		if merge.IntoTrackedFileID != historyIDs[filepath.Base(merge.Path)] {
+			t.Errorf("merge %+v went into the wrong row; want %d", merge, historyIDs[filepath.Base(merge.Path)])
+		}
+	}
+	if got := f.count(`SELECT COUNT(*) FROM tracked_files WHERE path LIKE ?`, newRoot+"/%"); got != 2 {
+		t.Fatalf("tracked files under the new root = %d, want 2", got)
+	}
+	if got := f.count(`SELECT COUNT(*) FROM tracked_files WHERE path LIKE ?`, oldRoot+"/%"); got != 0 {
+		t.Fatalf("tracked files left at the old root = %d", got)
+	}
+	if got := f.count(`SELECT COUNT(*) FROM tracked_file_versions`); got != versionsAfterScan || got < versionsBefore {
+		t.Fatalf("versions = %d, want all %d kept", got, versionsAfterScan)
+	}
+	view, err := f.store.GetPromptCollectionView(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, output := range view.Outputs {
+		if output.TrackedFileID != historyIDs[output.RelativePath] || !output.ExistsOnDisk {
+			t.Fatalf("output after move = %+v, want tracked file %d", output, historyIDs[output.RelativePath])
+		}
+	}
+	var status string
+	if err := f.store.db.QueryRow(`SELECT status FROM tracked_files WHERE id=?`, historyIDs["CLAUDE.md"]).Scan(&status); err != nil || status != "present" {
+		t.Fatalf("history row status = %q (%v), want present taken from the scanned row", status, err)
+	}
+
+	// The edit made after the move is a drift like any other, and the next
+	// scan adds no row.
+	if _, err := f.store.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.count(`SELECT COUNT(*) FROM tracked_files WHERE path LIKE ?`, newRoot+"/%"); got != 2 {
+		t.Fatalf("tracked files under the new root after a scan = %d, want 2", got)
+	}
+	reconciliation, err := f.store.ReconcilePromptDrifts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reconciliation.Detected) == 0 {
+		t.Fatalf("the edit made after the move produced no drift")
+	}
+}
+
 func TestMovingACollectionRootRefusesAndChangesNothing(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -162,10 +248,13 @@ func TestMovingACollectionRootRefusesAndChangesNothing(t *testing.T) {
 				}
 			}},
 		{name: "slug taken", root: "repos/orchestrator", slug: "main", status: 409, reason: "belongs to collection"},
-		{name: "tracked file at target", root: "repos/orchestrator", status: 409, reason: "already exists at",
+		{name: "target is another collection's output", root: "repos/orchestrator", status: 409, reason: "is an output of collection",
 			setup: func(f *promptFixture, id int64) {
-				f.write("repos/orchestrator/CLAUDE.md", "# Orchestrator\n")
-				if _, err := f.store.Scan(); err != nil {
+				other, err := f.store.EnsurePromptCollection("project", filepath.Join(f.home, "repos"), "", "")
+				if err != nil {
+					f.t.Fatal(err)
+				}
+				if _, err := f.store.AddPromptCollectionOutput(other.ID, "orchestrator/CLAUDE.md"); err != nil {
 					f.t.Fatal(err)
 				}
 			}},
