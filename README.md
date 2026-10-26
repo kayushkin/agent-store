@@ -199,9 +199,10 @@ accounted for it.
 (also run at the end of `POST /files/scan`) diffs the edited file against the
 content last accounted for and maps the difference onto sections. A drift that
 only edits existing sections is applied at once and the collection re-rendered,
-so the collection's other files catch up. One that adds or removes a section is
-**held** until `POST /prompt-drifts/{id}/apply`; `…/dismiss` lets the next
-render overwrite the file instead. Section bodies in a drift are cut from the
+so the collection's other files catch up. One that only adds sections waits
+for a tag on each new section and then applies by itself. One that removes a
+section or changes a heading is **held** until `POST /prompt-drifts/{id}/apply`;
+`…/dismiss` lets the next render overwrite the file instead. Section bodies in a drift are cut from the
 file by the splitter — no model writes them. A tagging agent may only annotate
 (`PUT /prompt-drifts/{id}/annotation`): tags for added sections, and a note. Applying checks, inside the transaction, that every section of the
 edited file is then present in the collection in the file's order.

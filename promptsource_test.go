@@ -803,3 +803,98 @@ func TestDismissingOneFileOfAnEditDismissesTheOther(t *testing.T) {
 		t.Fatal("the dismissed edit survived the render")
 	}
 }
+
+// An edit that only adds sections waits for their tags and then applies by
+// itself: no person approves it, and no section lands untagged.
+func TestAnAddedSectionAppliesItselfOnceTagged(t *testing.T) {
+	f := newPromptFixture(t)
+	id := f.importHost()
+	f.render(id)
+
+	f.write("AGENTS.md", strings.Replace(f.read("AGENTS.md"), "# Overview", "## Reminders\n\nOne coordinator.\n\n# Overview", 1))
+	reconciliation, err := f.store.ReconcilePromptDrifts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	drift := reconciliation.Detected[0]
+	if drift.Status != PromptDriftStatusHeld || drift.HeldReason != PromptDriftHeldReasonAddsSections {
+		t.Fatalf("drift = status %q reason %q, want held for its tags", drift.Status, drift.HeldReason)
+	}
+
+	untagged, err := f.store.SetPromptDriftAnnotation(drift.ID, PromptDriftAnnotation{Note: "no tags yet", InsertedSections: []PromptDriftInsertedSectionLabel{{OperationIndex: 0}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if untagged.Status != PromptDriftStatusHeld {
+		t.Fatalf("a label with no tags applied the drift: status %q", untagged.Status)
+	}
+
+	tagged, err := f.store.SetPromptDriftAnnotation(drift.ID, PromptDriftAnnotation{Note: "added reminders", AnnotatedBy: "test",
+		InsertedSections: []PromptDriftInsertedSectionLabel{{OperationIndex: 0, Tags: []string{"scheduler"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tagged.Status != PromptDriftStatusApplied {
+		t.Fatalf("tagged drift = status %q reason %q, want applied", tagged.Status, tagged.HeldReason)
+	}
+	f.render(id)
+	if !strings.Contains(f.read("CLAUDE.md"), "One coordinator.") {
+		t.Fatal("the added section did not reach the other file")
+	}
+}
+
+// Removing a section can drop a rule without anyone noticing, so it waits for
+// a person even after it is annotated.
+func TestARemovedSectionWaitsForAPerson(t *testing.T) {
+	f := newPromptFixture(t)
+	id := f.importHost()
+	f.render(id)
+
+	view, _ := f.store.GetPromptCollectionView(id)
+	removed := ""
+	for _, section := range view.Sections {
+		if section.Heading == "## Scheduler" {
+			removed = renderPromptSections([]PromptSection{section})
+		}
+	}
+	if removed == "" || !strings.Contains(f.read("AGENTS.md"), removed) {
+		t.Fatalf("fixture has no ## Scheduler section to remove")
+	}
+	f.write("AGENTS.md", strings.Replace(f.read("AGENTS.md"), removed, "", 1))
+	reconciliation, err := f.store.ReconcilePromptDrifts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	drift := reconciliation.Detected[0]
+	if drift.Status != PromptDriftStatusHeld || drift.HeldReason != PromptDriftHeldReasonRemovesOrRenames {
+		t.Fatalf("drift = status %q reason %q, want held for a person", drift.Status, drift.HeldReason)
+	}
+	annotated, err := f.store.SetPromptDriftAnnotation(drift.ID, PromptDriftAnnotation{Note: "removes scheduler"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if annotated.Status != PromptDriftStatusHeld {
+		t.Fatalf("annotating a removal applied it: status %q", annotated.Status)
+	}
+}
+
+// A changed heading is a rename: held for a person, with the old heading on
+// the operation so the page can show what it was.
+func TestARenamedHeadingWaitsForAPerson(t *testing.T) {
+	f := newPromptFixture(t)
+	id := f.importHost()
+	f.render(id)
+
+	f.write("AGENTS.md", strings.Replace(f.read("AGENTS.md"), "## Scheduler", "## Cron", 1))
+	reconciliation, err := f.store.ReconcilePromptDrifts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	drift := reconciliation.Detected[0]
+	if drift.Status != PromptDriftStatusHeld || drift.HeldReason != PromptDriftHeldReasonRemovesOrRenames {
+		t.Fatalf("drift = status %q reason %q, want held for a person", drift.Status, drift.HeldReason)
+	}
+	if len(drift.Operations) != 1 || drift.Operations[0].PreviousHeading != "## Scheduler" || drift.Operations[0].Heading != "## Cron" {
+		t.Fatalf("operations = %+v, want one rename from ## Scheduler to ## Cron", drift.Operations)
+	}
+}

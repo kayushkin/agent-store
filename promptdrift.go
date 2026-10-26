@@ -22,23 +22,35 @@ import (
 
 const (
 	PromptDriftStatusOpen             = "open"              // seen, operations computed, not yet decided
-	PromptDriftStatusHeld             = "held"              // needs a person: adds or removes sections, or could not be mapped
+	PromptDriftStatusHeld             = "held"              // waits: on labels for added sections, on a person for removed or renamed ones, or could not be mapped
 	PromptDriftStatusApplied          = "applied"           // the sections now account for the file
 	PromptDriftStatusDismissed        = "dismissed"         // the edit is not wanted; the next render overwrites the file
 	PromptDriftStatusSuperseded       = "superseded"        // the file changed again before this was settled
 	PromptDriftStatusAlreadyAccounted = "already_accounted" // the sections came to render this content by another path, so there was nothing to apply
 
-	PromptDriftHeldReasonStructural = "adds or removes sections; approve it to apply"
+	// PromptDriftHeldReasonRemovesOrRenames holds an edit that deletes a
+	// section or changes a heading: that can drop a rule without anyone
+	// noticing, so a person approves it.
+	PromptDriftHeldReasonRemovesOrRenames = "removes or renames sections; approve it to apply"
+	// PromptDriftHeldReasonAddsSections holds an edit that adds sections only
+	// until each new section is tagged, then it applies by itself
+	// (SetPromptDriftAnnotation). An agent documenting what it built adds a
+	// section; holding that for a person hid it from every harness that gets
+	// its prompt injected rather than from the file.
+	PromptDriftHeldReasonAddsSections = "adds sections; applies once each new section is tagged"
 )
 
 // PromptDriftOperation is one section write that, with the others in its
 // drift, makes the sections account for the drifted file.
 type PromptDriftOperation struct {
-	Kind            string   `json:"kind"`                        // update, insert, delete
-	SectionID       int64    `json:"section_id,omitempty"`        // update, delete
-	AfterSectionID  int64    `json:"after_section_id,omitempty"`  // insert: the section it follows
-	BeforeSectionID int64    `json:"before_section_id,omitempty"` // insert at the top of the file: the section it precedes
-	Heading         string   `json:"heading,omitempty"`
+	Kind            string `json:"kind"`                        // update, insert, delete
+	SectionID       int64  `json:"section_id,omitempty"`        // update, delete
+	AfterSectionID  int64  `json:"after_section_id,omitempty"`  // insert: the section it follows
+	BeforeSectionID int64  `json:"before_section_id,omitempty"` // insert at the top of the file: the section it precedes
+	Heading         string `json:"heading,omitempty"`
+	// PreviousHeading is set on an update that changes the section's
+	// heading: the heading it had. Such an update is a rename.
+	PreviousHeading string   `json:"previous_heading,omitempty"`
 	Body            string   `json:"body,omitempty"`
 	Tags            []string `json:"tags,omitempty"`
 }
@@ -369,13 +381,13 @@ func (s *Store) DetectPromptDrifts(collectionID int64) ([]PromptDrift, error) {
 		}
 
 		if status == PromptDriftStatusOpen {
-			if promptDriftOperationsAreEditsOnly(operations) {
+			if reason := promptDriftHoldReason(operations); reason == "" {
 				if err := s.ApplyPromptDrift(driftID, nil); err != nil {
 					if holdErr := s.holdPromptDrift(driftID, "could not be applied: "+err.Error()); holdErr != nil {
 						return detected, holdErr
 					}
 				}
-			} else if err := s.holdPromptDrift(driftID, PromptDriftHeldReasonStructural); err != nil {
+			} else if err := s.holdPromptDrift(driftID, reason); err != nil {
 				return detected, err
 			}
 		}
@@ -388,9 +400,38 @@ func (s *Store) DetectPromptDrifts(collectionID int64) ([]PromptDrift, error) {
 	return detected, nil
 }
 
-func promptDriftOperationsAreEditsOnly(operations []PromptDriftOperation) bool {
+// promptDriftHoldReason says why a drift with these operations waits, or ""
+// when it applies at once: text changes to existing sections apply at once, an
+// edit that adds sections waits only for their tags, and one that removes a
+// section or renames a heading waits for a person.
+func promptDriftHoldReason(operations []PromptDriftOperation) string {
+	addsSections := false
 	for _, operation := range operations {
-		if operation.Kind != PromptMarkdownEditUpdate {
+		switch {
+		case operation.Kind == PromptMarkdownEditDelete,
+			operation.Kind == PromptMarkdownEditUpdate && operation.PreviousHeading != "":
+			return PromptDriftHeldReasonRemovesOrRenames
+		case operation.Kind == PromptMarkdownEditInsert:
+			addsSections = true
+		}
+	}
+	if addsSections {
+		return PromptDriftHeldReasonAddsSections
+	}
+	return ""
+}
+
+// everyInsertedSectionIsTagged says whether the annotation gives at least one
+// tag to every section the drift adds.
+func everyInsertedSectionIsTagged(drift *PromptDrift, annotation *PromptDriftAnnotation) bool {
+	tagged := map[int]bool{}
+	for _, label := range annotation.InsertedSections {
+		if len(label.Tags) > 0 {
+			tagged[label.OperationIndex] = true
+		}
+	}
+	for index, operation := range drift.Operations {
+		if operation.Kind == PromptMarkdownEditInsert && !tagged[index] {
 			return false
 		}
 	}
@@ -479,7 +520,11 @@ func (s *Store) computePromptDriftOperations(collectionID int64, path, accounted
 			if !ok {
 				return []PromptDriftOperation{}, heldReason
 			}
-			operations = append(operations, PromptDriftOperation{Kind: edit.Kind, SectionID: id, Heading: changed[edit.ChangedIndex].Heading, Body: changed[edit.ChangedIndex].Body})
+			operation := PromptDriftOperation{Kind: edit.Kind, SectionID: id, Heading: changed[edit.ChangedIndex].Heading, Body: changed[edit.ChangedIndex].Body}
+			if operation.Heading != base[edit.BaseIndex].Heading {
+				operation.PreviousHeading = base[edit.BaseIndex].Heading
+			}
+			operations = append(operations, operation)
 		case PromptMarkdownEditDelete:
 			id, ok := need(edit.BaseIndex)
 			if !ok {
@@ -535,6 +580,14 @@ func (s *Store) SetPromptDriftAnnotation(id int64, annotation PromptDriftAnnotat
 	}
 	if _, err := s.db.Exec(`UPDATE prompt_drifts SET annotation=? WHERE id=?`, string(encoded), id); err != nil {
 		return nil, err
+	}
+	// An edit that only adds sections was waiting for exactly these labels.
+	if drift.Status == PromptDriftStatusHeld && drift.HeldReason == PromptDriftHeldReasonAddsSections && everyInsertedSectionIsTagged(drift, &annotation) {
+		if err := s.ApplyPromptDrift(id, &annotation); err != nil {
+			if holdErr := s.holdPromptDrift(id, "could not be applied: "+err.Error()); holdErr != nil {
+				return nil, holdErr
+			}
+		}
 	}
 	return s.GetPromptDrift(id)
 }
