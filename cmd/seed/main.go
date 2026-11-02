@@ -23,49 +23,16 @@ type MappingFile struct {
 }
 
 type MappingAgent struct {
-	ID       string      `json:"id"`
-	Inber    *string     `json:"inber"`
-	OpenClaw interface{} `json:"openclaw"`
-	Project  string      `json:"project"`
-	Emoji    string      `json:"emoji"`
-}
-
-// openclaw.json structures
-type OpenClawConfig struct {
-	Agents struct {
-		Defaults struct {
-			Model struct {
-				Primary   string   `json:"primary"`
-				Fallbacks []string `json:"fallbacks"`
-			} `json:"model"`
-			Workspace string `json:"workspace"`
-		} `json:"defaults"`
-		List []OpenClawAgent `json:"list"`
-	} `json:"agents"`
-}
-
-type OpenClawAgent struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Default   bool   `json:"default"`
-	Workspace string `json:"workspace"`
-	Identity  *struct {
-		Name  string `json:"name"`
-		Emoji string `json:"emoji"`
-	} `json:"identity"`
-	Model *struct {
-		Primary   string   `json:"primary"`
-		Fallbacks []string `json:"fallbacks"`
-	} `json:"model"`
-	Subagents *struct {
-		AllowAgents []string `json:"allowAgents"`
-	} `json:"subagents"`
+	ID      string  `json:"id"`
+	Inber   *string `json:"inber"`
+	Project string  `json:"project"`
+	Emoji   string  `json:"emoji"`
 }
 
 // agents.json structures
 type InberConfig struct {
-	Default string                 `json:"default"`
-	Agents  map[string]InberAgent  `json:"agents"`
+	Default string                `json:"default"`
+	Agents  map[string]InberAgent `json:"agents"`
 }
 
 type InberAgent struct {
@@ -206,7 +173,6 @@ func main() {
 	// Seed harnesses
 	orchs := []agentstore.Harness{
 		{ID: "inber", DisplayName: "Inber", ConfigPath: "~/repos/inber/agents/"},
-		{ID: "openclaw", DisplayName: "OpenClaw", ConfigPath: "~/.openclaw/openclaw.json"},
 		{ID: "dash", DisplayName: "Dash", APIEndpoint: "localhost:8101/api/agents"},
 	}
 	for i := range orchs {
@@ -246,21 +212,21 @@ func main() {
 		if hasInber {
 			tagsJSON, _ := json.Marshal(ia.Context.Tags)
 			ao := agentstore.AgentHarness{
-				AgentID:             agent.ID,
-				HarnessID:      "inber",
-				HarnessAgentID: inberSlug,
-				Enabled:             true,
-				ModelPrimary:        ia.Model,
-				WorkspacePath:       ia.Workspace,
-				ThinkingBudget:      ia.Thinking,
-				ContextBudget:       ia.Context.Budget,
-				ContextTags:         string(tagsJSON),
-				MaxTurns:            ia.Limits.MaxTurns,
-				MaxInputTokens:      ia.Limits.MaxInputTokens,
-				MaxResponseTime:     ia.Limits.MaxResponseTime,
-				SystemPrompt:        ia.System,
-				Project:             ia.Project,
-				Shelved:             ia.Shelved,
+				AgentID:         agent.ID,
+				HarnessID:       "inber",
+				HarnessAgentID:  inberSlug,
+				Enabled:         true,
+				ModelPrimary:    ia.Model,
+				WorkspacePath:   ia.Workspace,
+				ThinkingBudget:  ia.Thinking,
+				ContextBudget:   ia.Context.Budget,
+				ContextTags:     string(tagsJSON),
+				MaxTurns:        ia.Limits.MaxTurns,
+				MaxInputTokens:  ia.Limits.MaxInputTokens,
+				MaxResponseTime: ia.Limits.MaxResponseTime,
+				SystemPrompt:    ia.System,
+				Project:         ia.Project,
+				Shelved:         ia.Shelved,
 			}
 			if err := store.UpsertAgentHarness(&ao); err != nil {
 				log.Fatalf("upsert ao inber/%s: %v", ma.ID, err)
@@ -295,120 +261,10 @@ func main() {
 			}
 		}
 
-		// OpenClaw mapping(s)
-		var ocIDs []string
-		switch v := ma.OpenClaw.(type) {
-		case string:
-			ocIDs = []string{v}
-		case []interface{}:
-			for _, item := range v {
-				if s, ok := item.(string); ok {
-					ocIDs = append(ocIDs, s)
-				}
-			}
-		}
-		for i, ocID := range ocIDs {
-			if i == 0 {
-				ao := agentstore.AgentHarness{
-					AgentID:             agent.ID,
-					HarnessID:      "openclaw",
-					HarnessAgentID: ocID,
-					Enabled:             true,
-				}
-				if err := store.UpsertAgentHarness(&ao); err != nil {
-					log.Fatalf("upsert ao openclaw/%s: %v", ma.ID, err)
-				}
-			}
-			alias := agentstore.AgentNameAlias{AgentID: agent.ID, Alias: ocID, Context: "openclaw"}
-			if err := store.UpsertAlias(&alias); err != nil {
-				log.Fatalf("upsert alias %s→%s: %v", ocID, ma.ID, err)
-			}
-		}
-	}
-
-	// Seed OpenClaw agent configs from openclaw.json
-	home, _ := os.UserHomeDir()
-	openclawPath := filepath.Join(home, ".openclaw/openclaw.json")
-	ocData, err := os.ReadFile(openclawPath)
-	if err != nil {
-		log.Printf("warning: read openclaw.json: %v (skipping openclaw config seeding)", err)
-	} else {
-		var ocCfg OpenClawConfig
-		if err := json.Unmarshal(ocData, &ocCfg); err != nil {
-			log.Fatalf("parse openclaw.json: %v", err)
-		}
-
-		defaultModel := ocCfg.Agents.Defaults.Model.Primary
-		defaultFallbacks := ocCfg.Agents.Defaults.Model.Fallbacks
-
-		for _, oca := range ocCfg.Agents.List {
-			// Find agent by openclaw ID alias or harness mapping
-			agentID, found := int64(0), false
-			for _, ma := range mapping.Agents {
-				var ocIDs []string
-				switch v := ma.OpenClaw.(type) {
-				case string:
-					ocIDs = []string{v}
-				case []interface{}:
-					for _, item := range v {
-						if s, ok := item.(string); ok {
-							ocIDs = append(ocIDs, s)
-						}
-					}
-				}
-				for _, ocID := range ocIDs {
-					if ocID == oca.ID {
-						agentID = agentIDs[ma.ID]
-						found = true
-						break
-					}
-				}
-				if found {
-					break
-				}
-			}
-			if !found || agentID == 0 {
-				log.Printf("  openclaw agent %q not found in mapping, skipping", oca.ID)
-				continue
-			}
-
-			modelPrimary := defaultModel
-			var fallbacksJSON string
-			if oca.Model != nil {
-				modelPrimary = oca.Model.Primary
-				fb, _ := json.Marshal(oca.Model.Fallbacks)
-				fallbacksJSON = string(fb)
-			} else {
-				fb, _ := json.Marshal(defaultFallbacks)
-				fallbacksJSON = string(fb)
-			}
-
-			var subagentAllowJSON string
-			if oca.Subagents != nil {
-				sa, _ := json.Marshal(oca.Subagents.AllowAgents)
-				subagentAllowJSON = string(sa)
-			}
-
-			ao := agentstore.AgentHarness{
-				AgentID:             agentID,
-				HarnessID:      "openclaw",
-				HarnessAgentID: oca.ID,
-				Enabled:             true,
-				ModelPrimary:        modelPrimary,
-				ModelFallbacks:      fallbacksJSON,
-				WorkspacePath:       oca.Workspace,
-				IsDefault:           oca.Default,
-				SubagentAllow:       subagentAllowJSON,
-			}
-			if err := store.UpsertAgentHarness(&ao); err != nil {
-				log.Fatalf("upsert ao openclaw/%s: %v", oca.ID, err)
-			}
-			fmt.Printf("    openclaw: %s → model=%s workspace=%s\n", oca.ID, modelPrimary, oca.Workspace)
-		}
 	}
 
 	// Set default agents
-	defaults := map[string]string{"inber": "claxon", "openclaw": "claxon", "dash": "oisin"}
+	defaults := map[string]string{"inber": "claxon", "dash": "oisin"}
 	for orchID, agentSlug := range defaults {
 		if id, ok := agentIDs[agentSlug]; ok {
 			o, err := store.GetHarness(orchID)

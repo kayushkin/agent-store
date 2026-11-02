@@ -31,7 +31,7 @@ func main() {
 	}
 	fmt.Printf("✓ Resolved 'claxon' → id=%d slug=%s emoji=%s\n", agent.ID, agent.Slug, agent.Emoji)
 
-	// 2. Resolve by openclaw alias "main"
+	// 2. Resolve by the harness agent id "main"
 	agent2, err := store.ResolveAgentName("main")
 	if err != nil {
 		// "main" is the harness_agent_id, not an alias — check if that works
