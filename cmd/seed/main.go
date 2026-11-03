@@ -106,7 +106,7 @@ func resolveAgentIdentity(ma MappingAgent, ia InberAgent, hasInber bool) agentId
 
 	// Note: this assigns ia.Name unconditionally, so an inber entry with no
 	// name blanks a display name that was already derived from the id. That is
-	// this tool's behaviour today and is pinned as such in the tests, not
+	// this tool's behavior today and is pinned as such in the tests, not
 	// endorsed; cmd/migrate-inber guards the same override with a != "" check.
 	// Reconciling the two is filed separately.
 	identity.DisplayName = ia.Name

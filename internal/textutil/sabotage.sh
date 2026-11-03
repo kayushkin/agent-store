@@ -11,7 +11,7 @@
 #
 # That is the opposite of a table scoring ASSERTIONS by deletion, where UNNOTICED
 # means the assertion was the sole detector. Stated here because a verdict column
-# meaning the reverse of a neighbouring table's is one a reader misreads exactly
+# meaning the reverse of a neighboring table's is one a reader misreads exactly
 # once. This table scores mechanisms. Deleting an assertion on a healthy tree can
 # never redden anything, so that move is not used below.
 #
@@ -163,7 +163,7 @@ echo
 echo "=== controls: rows that MUST come back UNNOTICED ==="
 
 # Known-negative 1. Widening a guard past any value this package can see is a
-# behavioural no-op. A scorer reporting CAUGHT here reports CAUGHT for
+# behavioral no-op. A scorer reporting CAUGHT here reports CAUGHT for
 # everything, and its other rows mean nothing.
 run_case "no-op: width<=1 becomes width<2" UNNOTICED \
 	'width <= 1 {' \

@@ -238,7 +238,7 @@ echo "=== controls: rows that MUST come back UNNOTICED ==="
 # Two known-negatives, one per package. A scorer that reports CAUGHT here
 # reports CAUGHT for everything and its other rows mean nothing. Both are
 # spelling changes with identical semantics, so a red would be the suite
-# asserting the source text rather than the behaviour.
+# asserting the source text rather than the behavior.
 run_case "no-op: != \"\" becomes len() != 0" UNNOTICED "$MI" \
 	'	if configuredName != "" {' \
 	'	if len(configuredName) != 0 {'
@@ -248,17 +248,17 @@ run_case "no-op: len()>0 becomes len()!=0" UNNOTICED "$SEED" \
 	'	if len(ia.Projects) != 0 {'
 
 echo
-echo "=== the pin on undecided behaviour ==="
+echo "=== the pin on undecided behavior ==="
 
 # This row nearly did not get written. seed's empty-inber-name blanking is
-# pinned as CURRENT behaviour rather than fixed, so the first instinct was that
+# pinned as CURRENT behavior rather than fixed, so the first instinct was that
 # there is no mechanism to revert and nothing to score.
 #
 # That was wrong, and a per-test necessity run is what showed it: the pin test
 # was the only test in either package that reddened for NO mutation, which reads
-# as theatre. The missing mutation is the repair itself -- guard the override the
+# as theater. The missing mutation is the repair itself -- guard the override the
 # way cmd/migrate-inber guards it. A pin that does not redden when the pinned
-# behaviour changes is not pinning anything, and this is the row that proves it
+# behavior changes is not pinning anything, and this is the row that proves it
 # does.
 #
 # So CAUGHT here does not mean the mutation is wrong. It means that whoever makes

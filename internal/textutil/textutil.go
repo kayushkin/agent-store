@@ -27,14 +27,14 @@ import (
 // than a plain byte cut does: strings.ToUpper replaces the stray leading byte
 // with a three-byte U+FFFD and the continuation bytes are left stranded behind
 // it, so "🎯quest" comes back as invalid UTF-8 rather than merely
-// mis-capitalised. A tail cut at least leaves a recognisable prefix.
+// mis-capitalised. A tail cut at least leaves a recognizable prefix.
 //
 // It also panics on the empty string, because ""[:1] is out of range. That is
 // the louder failure of the two and the easier one to miss in review, since the
 // expression reads as though it were guarded.
 func UpperFirstRune(s string) string {
 	// Belt-and-braces, not load-bearing, and sabotage.sh scores it as such.
-	// Removing this early return changes no behaviour: DecodeRuneInString("")
+	// Removing this early return changes no behavior: DecodeRuneInString("")
 	// returns (RuneError, 0), so the invalid-lead-byte guard below already
 	// returns "" unchanged. It is kept because stating the empty case here is
 	// clearer than resting on a non-obvious stdlib return value -- but it is not

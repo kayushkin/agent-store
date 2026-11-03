@@ -235,7 +235,7 @@ func TestResolveAgentIdentityLetsAnEmptyInberNameBlankTheDisplayName(t *testing.
 
 	if got.DisplayName != "" {
 		t.Errorf("display name = %q, want %q — if this now falls back to the id, seed's "+
-			"behaviour changed and the divergence card should be closed, not this test edited",
+			"behavior changed and the divergence card should be closed, not this test edited",
 			got.DisplayName, "")
 	}
 }

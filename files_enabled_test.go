@@ -271,7 +271,7 @@ func TestAMissingSourceFileIsAnErrorAndLeavesTheRowAlone(t *testing.T) {
 }
 
 // The suffix is a contract between this function and canonicalPath(): the
-// switch writes ".disabled" and the scan is what has to recognise it. Drift the
+// switch writes ".disabled" and the scan is what has to recognize it. Drift the
 // suffix in one of them and a disabled file stops being tracked entirely, which
 // no test confined to either side can see.
 func TestAScanAgreesWithTheSuffixTheSwitchWrites(t *testing.T) {
@@ -293,7 +293,7 @@ func TestAScanAgreesWithTheSuffixTheSwitchWrites(t *testing.T) {
 		t.Fatalf("scan produced %d rows for one file: %+v", len(files), files)
 	}
 	if files[0].ID != f.ID {
-		t.Errorf("scan replaced row %d with %d; the disabled file was not recognised as the same file", f.ID, files[0].ID)
+		t.Errorf("scan replaced row %d with %d; the disabled file was not recognized as the same file", f.ID, files[0].ID)
 	}
 	if files[0].Enabled {
 		t.Error("scan re-enabled a file the switch disabled")
@@ -426,7 +426,7 @@ func TestTheDisableRouteReportsAFailedRename(t *testing.T) {
 // Characterisation — this pins a DEFECT, deliberately
 // ---------------------------------------------------------------------------
 
-// ⚠️ This test asserts behaviour that is WRONG, so that changing it has to be
+// ⚠️ This test asserts behavior that is WRONG, so that changing it has to be
 // deliberate. Do not read a passing run as an endorsement.
 //
 // os.Rename replaces its destination silently. Enabling a file whose canonical
@@ -470,7 +470,7 @@ func TestEnablingOverAnExistingCanonicalFileDestroysItWithoutCapturingAVersion(t
 		t.Fatal(err)
 	}
 	if string(got) != "ORIGINAL" {
-		t.Fatalf("current behaviour changed: canonical path holds %q, not the archived %q. "+
+		t.Fatalf("current behavior changed: canonical path holds %q, not the archived %q. "+
 			"If the rename now preserves the destination, this characterisation is obsolete — "+
 			"delete it and assert the new contract.", got, "ORIGINAL")
 	}
@@ -480,7 +480,7 @@ func TestEnablingOverAnExistingCanonicalFileDestroysItWithoutCapturingAVersion(t
 		t.Fatal(err)
 	}
 	if len(after) != len(before) {
-		t.Fatalf("current behaviour changed: %d versions before the clobber, %d after. "+
+		t.Fatalf("current behavior changed: %d versions before the clobber, %d after. "+
 			"Capturing the destroyed bytes is the fix this test was written to notice — "+
 			"replace it with an assertion that the captured version holds %q.",
 			len(before), len(after), "FRESH USER CONTENT")

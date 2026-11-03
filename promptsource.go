@@ -781,7 +781,7 @@ func (s *Store) inPromptTransaction(fn func(tx *sql.Tx) error) error {
 
 // CreatePromptSection adds a section and renders the collection. Placement,
 // first rule that applies: afterSectionID names the section it follows (the
-// collection is renumbered when the neighbours leave no room); else a non-zero
+// collection is renumbered when the neighbors leave no room); else a non-zero
 // section.Position is taken as given; else the section goes last.
 func (s *Store) CreatePromptSection(collectionID int64, section *PromptSection, afterSectionID int64, note string) (*PromptRenderResult, error) {
 	if _, err := s.getPromptCollection(collectionID); err != nil {

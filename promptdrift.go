@@ -603,7 +603,7 @@ func validatePromptDriftAnnotation(drift *PromptDrift, annotation *PromptDriftAn
 			return fmt.Errorf("inserted_sections[%d] points at operation %d, which is a %s; only an insert takes a label", i, label.OperationIndex, drift.Operations[label.OperationIndex].Kind)
 		}
 		if seen[label.OperationIndex] {
-			return fmt.Errorf("operation %d is labelled twice", label.OperationIndex)
+			return fmt.Errorf("operation %d is labeled twice", label.OperationIndex)
 		}
 		seen[label.OperationIndex] = true
 		label.Tags = normalizeTags(label.Tags)
@@ -744,7 +744,7 @@ func promptDriftTwinIDs(twins []PromptDriftTwin) []int64 {
 	return ids
 }
 
-// promptSectionPositionForInsert finds a position between the neighbours the
+// promptSectionPositionForInsert finds a position between the neighbors the
 // operation names, renumbering the collection first when they leave no room.
 func promptSectionPositionForInsert(tx *sql.Tx, collectionID int64, operation PromptDriftOperation) (int, error) {
 	for attempt := 0; attempt < 2; attempt++ {
